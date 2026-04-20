@@ -1,0 +1,7 @@
+{
+    "version": "0.1.0",
+    "download_url": "https://github.com/charlesvestal/schwung-tb3po/releases/download/v0.1.0/tb3po-module.tar.gz",
+    "name": "TB-3PO",
+    "description": "Generative 303-style acid-bassline sequencer",
+    "repo_url": "https://github.com/charlesvestal/schwung-tb3po"
+}
