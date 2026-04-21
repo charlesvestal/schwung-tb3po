@@ -95,6 +95,13 @@ typedef struct tb3po_inst {
     uint8_t bank_octaves[NUM_BANKS][MAX_STEPS];
     uint8_t bank_filled[NUM_BANKS];
 
+    /* One-deep undo buffer — snapshot before any destructive action (generate,
+     * mutate, clear). UI can call "undo" to restore. */
+    uint8_t undo_steps[MAX_STEPS];
+    uint8_t undo_degrees[MAX_STEPS];
+    uint8_t undo_octaves[MAX_STEPS];
+    int undo_valid;
+
     /* UI-observed step position (last advanced to) — JS UI polls this. */
     int ui_current_step;
 } tb3po_inst_t;
@@ -172,6 +179,20 @@ static void generate_pattern(tb3po_inst_t *t, uint32_t seed) {
         t->degrees[0] = 0;
         t->octaves[0] = 0;
     }
+}
+
+static void snapshot_undo(tb3po_inst_t *t) {
+    memcpy(t->undo_steps,   t->steps,   MAX_STEPS);
+    memcpy(t->undo_degrees, t->degrees, MAX_STEPS);
+    memcpy(t->undo_octaves, t->octaves, MAX_STEPS);
+    t->undo_valid = 1;
+}
+
+static void restore_undo(tb3po_inst_t *t) {
+    if (!t->undo_valid) return;
+    memcpy(t->steps,   t->undo_steps,   MAX_STEPS);
+    memcpy(t->degrees, t->undo_degrees, MAX_STEPS);
+    memcpy(t->octaves, t->undo_octaves, MAX_STEPS);
 }
 
 static void mutate_pattern(tb3po_inst_t *t) {
@@ -329,7 +350,14 @@ static void *tb3po_create(const char *module_dir, const char *json_defaults) {
     t->gate = 0.5f;
     t->sync = 0;
     t->channel = 1;
-    t->running = 1;
+    /* Don't self-play on load. Wait for 0xFA/0xFB from the host transport,
+     * or mark as running if transport is already playing when we come up. */
+    t->running = 0;
+    if (t->host && t->host->get_clock_status) {
+        if (t->host->get_clock_status() == MOVE_CLOCK_STATUS_RUNNING) {
+            t->running = 1;
+        }
+    }
     t->last_note_on = -1;
     t->position = t->length - 1;  /* first advance lands on 0 */
     t->pingpong_dir = 1;
@@ -433,10 +461,11 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
     else if (strcmp(key, "transpose") == 0) { int s = parse_int(val, 0); if (s < -48) s = -48; if (s > 48) s = 48; t->transpose = s; }
     else if (strcmp(key, "direction") == 0) t->direction = parse_int(val, 0) & 3;
     else if (strcmp(key, "seed") == 0)    { t->seed = (uint32_t)parse_int(val, 0xBEEF); generate_pattern(t, t->seed); t->position = t->length - 1; }
-    else if (strcmp(key, "generate") == 0) { t->seed = rng_next_u32(t); generate_pattern(t, t->seed); t->position = t->length - 1; }
-    else if (strcmp(key, "regen") == 0)    { generate_pattern(t, t->seed); t->position = t->length - 1; }  /* same seed, re-apply probs */
-    else if (strcmp(key, "mutate") == 0)  mutate_pattern(t);
-    else if (strcmp(key, "clear") == 0)   { for (int i = 0; i < MAX_STEPS; i++) t->steps[i] = STEP_REST; t->steps[0] = STEP_NOTE; }
+    else if (strcmp(key, "generate") == 0) { snapshot_undo(t); t->seed = rng_next_u32(t); generate_pattern(t, t->seed); t->position = t->length - 1; }
+    else if (strcmp(key, "regen") == 0)    { snapshot_undo(t); generate_pattern(t, t->seed); t->position = t->length - 1; }
+    else if (strcmp(key, "mutate") == 0)   { snapshot_undo(t); mutate_pattern(t); }
+    else if (strcmp(key, "clear") == 0)    { snapshot_undo(t); for (int i = 0; i < MAX_STEPS; i++) t->steps[i] = STEP_REST; t->steps[0] = STEP_NOTE; }
+    else if (strcmp(key, "undo") == 0)     restore_undo(t);
     else if (strcmp(key, "store_bank") == 0) {
         int b = parse_int(val, 0);
         if (b >= 0 && b < NUM_BANKS) {
@@ -524,6 +553,7 @@ static int tb3po_get_param(void *inst, const char *key, char *buf, int buf_len) 
     else if (strcmp(key, "running") == 0)    n = snprintf(buf, buf_len, "%d", t->running ? 1 : 0);
     else if (strcmp(key, "follow_transport") == 0) n = snprintf(buf, buf_len, "%d", t->follow_transport ? 1 : 0);
     else if (strcmp(key, "clock_status") == 0) n = snprintf(buf, buf_len, "%d", t->host_clock_status);
+    else if (strcmp(key, "sync_source") == 0) n = snprintf(buf, buf_len, "%s", t->pulse_sync_active ? "EXT" : "INT");
     else if (strcmp(key, "pattern") == 0) {
         /* Compact row: "len|steps|degs|octs" — pipe-separated, each is comma-separated ints. */
         int off = 0;

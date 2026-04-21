@@ -3,6 +3,11 @@
 import {
     showOverlay, tickOverlay, drawOverlay, hideOverlay
 } from '/data/UserData/schwung/shared/menu_layout.mjs';
+import {
+    decodeAcceleratedDelta, resetAllEncoderAccel,
+    setLED as sharedSetLED, setButtonLED as sharedSetButtonLED
+} from '/data/UserData/schwung/shared/input_filter.mjs';
+import { createValue, createEnum } from '/data/UserData/schwung/shared/menu_items.mjs';
 
 //
 // Knobs (CC 71-78, relative encoders) edit params. Pads are arranged 4x8
@@ -33,6 +38,7 @@ const CC_DOWN = 54;             // Move's - button (octave down)
 const CC_UP = 55;               // Move's + button (octave up)
 const CC_LEFT = 62;             // Move's Left button (step page -)
 const CC_RIGHT = 63;            // Move's Right button (step page +)
+const CC_UNDO = 56;             // Move's Undo button
 const CC_TRACK1 = 43;           // Track 1 button (reversed: CC43=T1, CC40=T4)
 const CC_TRACK2 = 42;
 
@@ -86,6 +92,7 @@ let ui = {
     bankFilled: new Array(8).fill(false),
     transpose: 0,
     running: 1,
+    syncSource: "INT",
     steps: new Array(32).fill(STEP_REST)
 };
 
@@ -94,6 +101,14 @@ let shiftHeld = false;
 let currentPage = PAGE_PERFORM;
 let controlMode = MODE_3PO;
 let stepView = 0;   // which 16-step window of the pattern is shown (0 or 1)
+
+// Per-page jog menu state. Each editable page maintains its own selected
+// index and edit flag. Values are applied LIVE while editing (no uncommitted
+// buffer) because most params have immediate audible effect.
+const menuState = {
+    [PAGE_MUTATION]: { selectedIndex: 0, editing: false },
+    [PAGE_SCALE]:    { selectedIndex: 0, editing: false }
+};
 
 function stepPageCount() { return Math.max(1, Math.ceil(ui.length / 16)); }
 function clampStepView()  { const m = stepPageCount() - 1; if (stepView > m) stepView = m; if (stepView < 0) stepView = 0; }
@@ -148,14 +163,29 @@ function pollDsp() {
                 ui.bankFilled[i] = (bf[i] === "1");
             }
         }
+        const ss = getDspParam("sync_source");
+        if (ss === "EXT" || ss === "INT") ui.syncSource = ss;
+    }
+
+    // Re-scan for a 303 slot every ~1.4 sec so Track 2 / 303-mode UX reflects
+    // reality: hidden when no 303 is loaded, visible when one is loaded later.
+    if ((pollTick % 60) === 0) {
+        cc303SlotIdx = find303Slot();
+        const prev = has303Slot;
+        has303Slot = cc303SlotIdx >= 0;
+        if (prev && !has303Slot && controlMode === MODE_303) {
+            controlMode = MODE_3PO;
+            showOverlay("303 unloaded", "knob mode → 3PO");
+        }
     }
     pollTick++;
 }
 
 // -------- Knob handling ----------
 
+// Local helper kept for any plain-delta path. All knob handlers now use
+// decodeAcceleratedDelta from input_filter.mjs so fast turns scale up.
 function decodeDelta(value) {
-    // Shadow UI flushes relative encoders as: 1..63 = CW count, 65..127 = CCW (128 - v).
     if (value === 0 || value === 64) return 0;
     if (value <= 63) return value;
     return -(128 - value);
@@ -197,6 +227,124 @@ function adjustLength(delta) {
 }
 
 let patternStale = false;  // true when prob-knobs have changed since last generate
+
+// -------- Jog-menu items per page ----------
+// Each page that's editable declares an items() builder. The items are
+// rebuilt per access so they read the live ui state via their getters.
+
+function scalePageItems() {
+    return [
+        createEnum("Root", {
+            get: () => ui.root,
+            set: (v) => { ui.root = v; setDspParam("root", String(v)); },
+            options: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            format: (v) => ROOT_NAMES[v] || "?"
+        }),
+        createEnum("Scale", {
+            get: () => ui.scale,
+            set: (v) => { ui.scale = v; setDspParam("scale", String(v)); },
+            options: SCALE_NAMES.map((_, i) => i),
+            format: (v) => SCALE_NAMES[v] || "?"
+        }),
+        createEnum("Length", {
+            get: () => ui.length,
+            set: (v) => { ui.length = v; setDspParam("length", String(v)); },
+            options: LENGTHS
+        }),
+        createValue("Gate", {
+            get: () => Math.round(ui.gate * 100),
+            set: (v) => { ui.gate = v / 100; setDspParam("gate", (v / 100).toFixed(3)); },
+            min: 10, max: 100,
+            format: (v) => v + "%"
+        })
+    ];
+}
+
+function mutationPageItems() {
+    const setStale = () => { patternStale = true; };
+    return [
+        createValue("Density", {
+            get: () => Math.round(ui.density * 100),
+            set: (v) => { ui.density = v / 100; setDspParam("density", (v / 100).toFixed(3)); setStale(); },
+            min: 0, max: 100, format: (v) => v + "%"
+        }),
+        createValue("Accent", {
+            get: () => Math.round(ui.accent * 100),
+            set: (v) => { ui.accent = v / 100; setDspParam("accent", (v / 100).toFixed(3)); setStale(); },
+            min: 0, max: 100, format: (v) => v + "%"
+        }),
+        createValue("Slide", {
+            get: () => Math.round(ui.slide * 100),
+            set: (v) => { ui.slide = v / 100; setDspParam("slide", (v / 100).toFixed(3)); setStale(); },
+            min: 0, max: 100, format: (v) => v + "%"
+        }),
+        createValue("Octaves", {
+            get: () => ui.octaves,
+            set: (v) => { ui.octaves = v; setDspParam("octaves", String(v)); setStale(); },
+            min: 1, max: 3
+        })
+    ];
+}
+
+function currentPageItems() {
+    if (currentPage === PAGE_SCALE)    return scalePageItems();
+    if (currentPage === PAGE_MUTATION) return mutationPageItems();
+    return null;
+}
+
+function adjustMenuItem(item, delta) {
+    if (!item || delta === 0 || !item.set || !item.get) return;
+    const cur = item.get();
+    if (item.type === "value") {
+        const next = clamp(cur + delta, item.min, item.max);
+        if (next !== cur) item.set(next);
+    } else if (item.type === "enum") {
+        const opts = item.options || [];
+        if (opts.length === 0) return;
+        const idx = opts.indexOf(cur);
+        const sign = delta > 0 ? 1 : -1;
+        const newIdx = (idx < 0 ? 0 : (idx + sign + opts.length)) % opts.length;
+        const next = opts[newIdx];
+        if (next !== cur) item.set(next);
+    }
+}
+
+function handleJogTurn(delta) {
+    if (delta === 0) return;
+    const state = menuState[currentPage];
+    const items = currentPageItems();
+    if (!state || !items || items.length === 0) return;
+
+    if (state.editing) {
+        adjustMenuItem(items[state.selectedIndex], delta);
+        const item = items[state.selectedIndex];
+        if (item && item.get) {
+            const formatted = item.format ? item.format(item.get()) : String(item.get());
+            showOverlay(item.label, formatted);
+        }
+    } else {
+        const n = items.length;
+        // One detent per click for navigation — don't let acceleration jump
+        // multiple rows in a list this short.
+        const step = delta > 0 ? 1 : -1;
+        state.selectedIndex = (state.selectedIndex + step + n) % n;
+    }
+}
+
+function handleJogClick() {
+    const state = menuState[currentPage];
+    const items = currentPageItems();
+    if (!state || !items || items.length === 0) return;
+    const item = items[state.selectedIndex];
+    if (!item) return;
+    state.editing = !state.editing;
+    if (state.editing) {
+        const formatted = item.format ? item.format(item.get()) : String(item.get());
+        showOverlay("Edit " + item.label, formatted);
+    } else {
+        showOverlay(item.label, "confirmed");
+    }
+}
 
 function knobOverlayInfo(idx) {
     if (controlMode === MODE_303) {
@@ -241,9 +389,45 @@ function handleKnob(knobIdx, delta) {
     if (info) showOverlay(info.name, info.value);
 }
 
+// Slot that currently hosts the 303 plugin. Refreshed on 303-mode entry and
+// periodically so the UI can hide/disable 303 mode when no 303 is loaded.
+let cc303SlotIdx = -1;
+let has303Slot = false;
+
+// Param keys 303 plugin exposes via get_param, matching CC_303 index order.
+const CC_303_PARAM_KEYS = [
+    "cutoff", "resonance", "decay", "env_mod",
+    "accent", "volume", "overdrive_level", "overdrive_dry_wet"
+];
+
+function find303Slot() {
+    if (typeof shadow_get_param !== "function") return -1;
+    for (let s = 0; s < 4; s++) {
+        const mod = shadow_get_param(s, "synth_module");
+        if (mod === "303") return s;
+    }
+    return -1;
+}
+
+function sync303FromPlugin() {
+    // Pull the 303's current param values into cc303Values (0..127) so the
+    // first knob turn doesn't jump the synth, and so the displayed value
+    // actually reflects reality.
+    if (typeof shadow_get_param !== "function") return;
+    if (cc303SlotIdx < 0) cc303SlotIdx = find303Slot();
+    if (cc303SlotIdx < 0) return;
+    for (let i = 0; i < CC_303_PARAM_KEYS.length; i++) {
+        const v = shadow_get_param(cc303SlotIdx, CC_303_PARAM_KEYS[i]);
+        if (v === null || v === "") continue;
+        const fv = parseFloat(v);
+        if (!isFinite(fv)) continue;
+        cc303Values[i] = Math.round(clamp(fv * 127, 0, 127));
+    }
+}
+
 function send303Cc(knobIdx, delta) {
     const cc = CC_303[knobIdx];
-    if (cc === undefined) return;
+    if (cc === undefined || delta === 0) return;
     const next = clamp((cc303Values[knobIdx] | 0) + delta, 0, 127);
     if (next === cc303Values[knobIdx]) return;
     cc303Values[knobIdx] = next;
@@ -324,21 +508,23 @@ function handlePadNoteOn(note, vel) {
 }
 
 // -------- LED feedback ----------
-// We cache per-pad color locally so we only send move_midi_internal_send when
-// the color actually changes. This avoids flooding the LED queue AND minimizes
-// echo potential (each change potentially round-trips through Move firmware).
+// Use the shared setLED / setButtonLED helpers from input_filter.mjs — same
+// note/CC dedup the other overtake modules use. The shadow-side LED queue
+// only flushes 16 LEDs per tick, so deduping is required; blasting 40+ unique
+// LEDs every frame starves the queue (was the "LEDs don't work at all" bug).
+//
+// Force-refresh-on-gap: if the tick loop was idle for >500ms we probably
+// just came out of suspend, and hardware state may have drifted. Set a flag
+// and pass force=true to every LED write for that one tick so everything
+// repaints.
 
-const ledCache = new Array(256).fill(-1);  // [0..127] = note LEDs, [128..255] = CC LEDs
+let lastRefreshMs = 0;
+let ledForceNextRefresh = true;  // also true on first paint
 
 function padNote(row, col) { return NOTE_PAD_BASE + row * 8 + col; }
 
 function setLed(row, col, color) {
-    if (typeof move_midi_internal_send !== "function") return;
-    const note = padNote(row, col);
-    const c = color & 0x7F;
-    if (ledCache[note] === c) return;
-    ledCache[note] = c;
-    move_midi_internal_send([0x09, 0x90, note, c]);
+    sharedSetLED(padNote(row, col), color & 0x7F, ledForceNextRefresh);
 }
 
 function stepLedColor(kind) {
@@ -351,52 +537,56 @@ function stepLedColor(kind) {
 }
 
 function setStepLed(idx, color) {
-    if (typeof move_midi_internal_send !== "function") return;
-    const note = NOTE_STEP_BASE + idx;
-    const c = color & 0x7F;
-    if (ledCache[note] === c) return;
-    ledCache[note] = c;
-    move_midi_internal_send([0x09, 0x90, note, c]);
+    sharedSetLED(NOTE_STEP_BASE + idx, color & 0x7F, ledForceNextRefresh);
 }
 
-// Track-row LEDs are set via CC (0xB0). The shim's LED queue dedupes on note
-// and CC separately. Our ledCache uses the LED key-space: notes live at
-// [0..127], so stash CC-addressed LEDs starting at 128 to avoid collision.
 function setTrackLed(cc, color) {
-    if (typeof move_midi_internal_send !== "function") return;
-    const key = 128 + cc;
-    const c = color & 0x7F;
-    if (ledCache[key] === c) return;
-    ledCache[key] = c;
-    move_midi_internal_send([0x0B, 0xB0, cc, c]);
+    sharedSetButtonLED(cc, color & 0x7F, ledForceNextRefresh);
 }
 
 function refreshLeds() {
     clampStepView();
+    // Force a full repaint every ~2 sec unconditionally. Tick fires during
+    // suspend too, so we can't rely on a gap; a periodic unconditional
+    // refresh is the simplest fix for LEDs drifting away from our cache
+    // (e.g. after Move firmware wrote over them during suspend).
+    if ((pollTick % 88) === 0) ledForceNextRefresh = true;
+    // Also detect a large wall-clock gap — faster recovery in the case where
+    // tick does actually stop (JS frozen during some other suspend variant).
+    const now = Date.now();
+    if (lastRefreshMs > 0 && (now - lastRefreshMs) > 500) {
+        ledForceNextRefresh = true;
+    }
+    lastRefreshMs = now;
     const pageBase = stepView * 16;
 
     // Rows 2 & 3 — step grid for the current 16-step page. Cursor = bright
-    // white on the playing step, but only when that step is visible on this
-    // page (so the cursor disappears when playback moves off-page).
+    // Use YELLOW for the cursor — white collided with plain NOTE steps which
+    // are also white, making the cursor invisible on those pads.
     for (let col = 0; col < 8; col++) {
         const step = pageBase + col;
         let color = (step < ui.length) ? stepLedColor(ui.steps[step]) : LED_OFF;
-        if (ui.running && step === ui.position) color = LED_WHITE;
+        if (ui.running && step === ui.position) color = LED_YELLOW;
         setLed(3, col, color);
     }
     for (let col = 0; col < 8; col++) {
         const step = pageBase + 8 + col;
         let color = (step < ui.length) ? stepLedColor(ui.steps[step]) : LED_OFF;
-        if (ui.running && step === ui.position) color = LED_WHITE;
+        if (ui.running && step === ui.position) color = LED_YELLOW;
         setLed(2, col, color);
     }
 
     // Row 1 — banks. Current = bright purple, filled = teal, empty = off.
     // Queued recall flashes between bright yellow and its normal colour.
+    // While Shift is held, the row shifts to red/pink to signal "SAVE slots".
     const flashPhase = Math.floor(pollTick / 4) & 1;
     for (let col = 0; col < 8; col++) {
         let color;
-        if (col === ui.pendingRecall && flashPhase) {
+        if (shiftHeld) {
+            // Save-mode cue — all slots pulse red so the user sees "these
+            // are save targets now".
+            color = (col === ui.currentBank) ? LED_WHITE : (flashPhase ? LED_RED : LED_PINK);
+        } else if (col === ui.pendingRecall && flashPhase) {
             color = LED_YELLOW;
         } else if (col === ui.currentBank) {
             color = LED_PURPLE;
@@ -428,9 +618,26 @@ function refreshLeds() {
         }
     }
 
-    // Track buttons 1..2 — knob mode indicator.
-    setTrackLed(CC_TRACK1, controlMode === MODE_3PO ? LED_TEAL   : LED_DARK_GREY);
-    setTrackLed(CC_TRACK2, controlMode === MODE_303 ? LED_ORANGE : LED_DARK_GREY);
+    // Track buttons 1..2 — knob mode indicator. Track 2 only lights when a
+    // 303 is actually loaded somewhere tb3po can reach.
+    setTrackLed(CC_TRACK1, controlMode === MODE_3PO ? LED_TEAL : LED_DARK_GREY);
+    if (has303Slot) {
+        setTrackLed(CC_TRACK2, controlMode === MODE_303 ? LED_ORANGE : LED_DARK_GREY);
+    } else {
+        setTrackLed(CC_TRACK2, LED_OFF);
+    }
+
+    // Hardware buttons tb3po owns. Play is intentionally NOT set here —
+    // we want Move firmware to drive it (passthrough capability).
+    setTrackLed(CC_UP,     LED_DARK_GREY);                 // +  octave up
+    setTrackLed(CC_DOWN,   LED_DARK_GREY);                 // -  octave down
+    setTrackLed(CC_LEFT,   stepPageCount() > 1 ? LED_DARK_GREY : LED_OFF);
+    setTrackLed(CC_RIGHT,  stepPageCount() > 1 ? LED_DARK_GREY : LED_OFF);
+    setTrackLed(CC_DELETE, LED_RED);                       // X  CLEAR (red warn)
+    setTrackLed(CC_UNDO,   LED_DARK_GREY);                 // Undo last op
+
+    // Clear the force-refresh flag now that all LEDs have been written.
+    ledForceNextRefresh = false;
 }
 
 // -------- Display ----------
@@ -485,9 +692,10 @@ function drawPerformPage() {
     const rootName = ROOT_NAMES[ui.root] || "?";
     const dirName = DIRECTIONS[ui.direction] || "?";
     if (typeof print === "function") {
-        // 21-char max: "Amin 120bpm Fwd Ch1 B2"
-        print(0, 0, rootName + scaleName + " " + (ui.bpm | 0) + "bpm " +
-                     dirName + " Ch" + ui.channel + " B" + (ui.currentBank + 1), 1);
+        // 21-char max: "Amin 120 EXT Ch1 B1 F"
+        print(0, 0, rootName + scaleName + " " + (ui.bpm | 0) + " " +
+                     ui.syncSource + " Ch" + ui.channel + " B" + (ui.currentBank + 1) +
+                     " " + dirName.charAt(0), 1);
     }
     drawStepGrid(12);
     if (typeof print === "function") {
@@ -505,44 +713,70 @@ function drawPerformPage() {
     drawPageFooter(56);
 }
 
+function drawMenuList(items, state, startY) {
+    // Menu row style: selected row gets inverted background (fill + black text).
+    // Editing shows [value] brackets. Same visual language as core menus.
+    if (typeof print !== "function") return;
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const y = startY + i * 10;
+        const val = it.get ? it.get() : "";
+        const formatted = it.format ? it.format(val) : String(val);
+        const line = it.label + ": " + formatted;
+        const selected = (i === state.selectedIndex);
+        const editing = selected && state.editing;
+        if (selected) {
+            if (typeof fill_rect === "function") fill_rect(0, y - 1, 128, 9, 1);
+            const prefix = editing ? "> " : "  ";
+            const shown = editing ? (it.label + ": [" + formatted + "]") : line;
+            print(2, y, prefix + shown, 0);
+        } else {
+            print(2, y, "  " + line, 1);
+        }
+    }
+}
+
 function drawMutationPage() {
     if (controlMode === MODE_303) {
-        // 303 mode — show the 8 CC knobs as a compact two-column legend.
+        // 303 mode — 8 knobs in a two-column list with full labels.
         if (typeof print !== "function") return;
-        print(0, 0, "303 CC KNOBS", 1);
+        const full = ["Cutoff", "Reson", "Decay", "EnvMod", "Accent", "Volume", "Ovdrv", "OvdMix"];
+        print(0, 0, "MUTATION (knobs: 303)", 1);
         for (let k = 0; k < 8; k++) {
             const row = k % 4;
             const leftCol = k < 4;
-            const x = leftCol ? 0 : 66;
+            const x = leftCol ? 0 : 64;
             const y = 14 + row * 10;
-            print(x, y, (k + 1) + " " + CC_303_LABELS[k] + " " + cc303Values[k], 1);
+            print(x, y, "K" + (k + 1) + " " + full[k] + ":" + cc303Values[k], 1);
         }
-        print(0, 56, "T1=3PO  T2=303", 1);
+        print(0, 56, "T1 to return to 3PO", 1);
         return;
     }
     if (typeof print === "function") {
         print(0, 0, "MUTATION" + (patternStale ? "  * stale" : ""), 1);
     }
-    drawBar(12, "Dens", ui.density, Math.round(ui.density * 100) + "%");
-    drawBar(22, "Accn", ui.accent,  Math.round(ui.accent * 100) + "%");
-    drawBar(32, "Slid", ui.slide,   Math.round(ui.slide * 100) + "%");
-    drawBar(42, "Oct",  (ui.octaves - 1) / 2, ui.octaves + "");
+    drawMenuList(mutationPageItems(), menuState[PAGE_MUTATION], 14);
     if (typeof print === "function") {
-        print(0, 56, "P1 NEW   P2 MUT", 1);
+        print(0, 56, "Jog nav/edit  P1 NEW", 1);
     }
 }
 
 function drawScalePage() {
-    const scaleName = SCALE_NAMES[ui.scale] || "?";
-    const rootName = ROOT_NAMES[ui.root] || "?";
-    if (typeof print === "function") {
-        print(0, 0,  "SCALE", 1);
-        print(0, 12, "Root:   " + rootName, 1);
-        print(0, 22, "Scale:  " + scaleName, 1);
-        print(0, 32, "Length: " + ui.length, 1);
-        print(0, 42, "Gate:   " + Math.round(ui.gate * 100) + "%", 1);
-        print(0, 56, "Knobs 5-8 adjust", 1);
+    if (typeof print !== "function") return;
+    if (controlMode === MODE_303) {
+        // Knobs 5-8 aren't scale knobs in 303 mode — they're Accent / Volume /
+        // Overdrive Lvl / Overdrive Mix. Show those with their current CC values.
+        print(0, 0,  "SCALE  (knobs: 303)", 1);
+        print(0, 14, "K5 Accent:    " + cc303Values[4], 1);
+        print(0, 24, "K6 Volume:    " + cc303Values[5], 1);
+        print(0, 34, "K7 Overdrive: " + cc303Values[6], 1);
+        print(0, 44, "K8 Ovdrv Mix: " + cc303Values[7], 1);
+        print(0, 56, "T1 to return to 3PO", 1);
+        return;
     }
+    print(0, 0, "SCALE", 1);
+    drawMenuList(scalePageItems(), menuState[PAGE_SCALE], 14);
+    print(0, 56, "Jog nav/edit  Knobs 5-8", 1);
 }
 
 function drawHelpPage() {
@@ -573,6 +807,11 @@ function draw() {
 
 globalThis.init = function() {
     console.log("[tb3po] ui init");
+    // First-load nudge — tb3po emits MIDI on its configured channel but
+    // doesn't itself produce audio. Without a shadow slot listening on that
+    // channel, nothing is heard. Show this once on load so the user knows
+    // where to point a synth.
+    showOverlay("MIDI -> Ch " + ui.channel, "route a synth", 360);
 };
 
 globalThis.tick = function() {
@@ -612,11 +851,22 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    // X / Delete button = CLEAR. Deliberately mapped off the pad grid so it
-    // takes a real reach to hit accidentally.
+    // X / Delete button = CLEAR, but GATED behind Shift so a stray press
+    // on the hardware button doesn't wipe a pattern. Plain X nudges the user.
     if (type === 0xB0 && d1 === CC_DELETE && d2 > 0) {
-        setDspParam("clear", "1");
-        showOverlay("Pattern", "cleared");
+        if (shiftHeld) {
+            setDspParam("clear", "1");
+            showOverlay("Pattern", "cleared");
+        } else {
+            showOverlay("Clear", "Shift+X to confirm");
+        }
+        return;
+    }
+
+    // Undo button — restore the pattern before the last NEW / MUTATE / CLEAR.
+    if (type === 0xB0 && d1 === CC_UNDO && d2 > 0) {
+        setDspParam("undo", "1");
+        showOverlay("Undo", "last pattern op");
         return;
     }
 
@@ -657,7 +907,16 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
     if (type === 0xB0 && d1 === CC_TRACK2 && d2 > 0) {
+        // Force a fresh slot scan on every Track 2 press so a just-loaded
+        // 303 is picked up without waiting for the periodic poll.
+        cc303SlotIdx = find303Slot();
+        has303Slot = cc303SlotIdx >= 0;
+        if (!has303Slot) {
+            showOverlay("No 303 loaded", "route a 303 to Ch" + ui.channel);
+            return;
+        }
         controlMode = MODE_303;
+        sync303FromPlugin();
         showOverlay("Knob mode", "303 CCs");
         return;
     }
@@ -665,7 +924,30 @@ globalThis.onMidiMessageInternal = function(data) {
     // Knob deltas arrive as synthetic CC messages (CC 71-78).
     if (type === 0xB0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
         const knobIdx = d1 - CC_KNOB_BASE;
-        handleKnob(knobIdx, decodeDelta(d2));
+        // Accelerated: turning fast yields bigger deltas, so sweeps across
+        // Root / Scale / values feel smooth instead of one-click-at-a-time.
+        handleKnob(knobIdx, decodeAcceleratedDelta(d2, knobIdx));
+        return;
+    }
+
+    // Jog wheel (CC 14) — menu navigation / value editing on MUTATION & SCALE.
+    if (type === 0xB0 && d1 === 14) {
+        if (controlMode !== MODE_3PO) return;
+        if (currentPage !== PAGE_MUTATION && currentPage !== PAGE_SCALE) return;
+        const state = menuState[currentPage];
+        if (!state) return;
+        const delta = state.editing
+            ? decodeAcceleratedDelta(d2, "jog_edit")
+            : decodeDelta(d2);
+        handleJogTurn(delta);
+        return;
+    }
+
+    // Jog click (CC 3, main button) — enter/confirm edit.
+    if (type === 0xB0 && d1 === 3 && d2 > 0) {
+        if (controlMode !== MODE_3PO) return;
+        if (currentPage !== PAGE_MUTATION && currentPage !== PAGE_SCALE) return;
+        handleJogClick();
         return;
     }
 
