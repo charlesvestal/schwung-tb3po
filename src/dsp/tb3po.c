@@ -12,10 +12,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #define SAMPLE_RATE 44100
 #define MAX_STEPS   32
 #define NUM_BANKS   8
+
+/* Binary state file. Path is fixed — tb3po is a single-instance tool. */
+#define TB3PO_STATE_DIR  "/data/UserData/schwung/tool_state"
+#define TB3PO_STATE_PATH TB3PO_STATE_DIR "/tb3po.bin"
+#define TB3PO_STATE_MAGIC 0x50334254u   /* "TB3P" little-endian */
+#define TB3PO_STATE_VERSION 1u
 
 typedef enum { STEP_REST = 0, STEP_NOTE = 1, STEP_ACCENT = 2, STEP_SLIDE = 3 } step_kind_t;
 
@@ -104,6 +113,19 @@ typedef struct tb3po_inst {
 
     /* UI-observed step position (last advanced to) — JS UI polls this. */
     int ui_current_step;
+
+    /* State persistence. tb3po_set_param runs on the audio thread (shim
+     * dispatches from its SPI callback) so we can't do fopen/fwrite there —
+     * it marks state_dirty instead, and a background worker thread (started
+     * in create_instance, joined in destroy_instance) wakes up periodically
+     * and flushes if the flag is set. destroy_instance also flushes one
+     * last time synchronously. */
+    volatile int state_dirty;
+    volatile int state_thread_stop;
+    pthread_t    state_thread;
+    int          state_thread_started;
+    pthread_mutex_t state_mutex;  /* guards the save itself so destroy can't
+                                     race with the worker's fwrite */
 } tb3po_inst_t;
 
 /* ---------------------------------------------------------------------- */
@@ -327,6 +349,177 @@ static void advance_step(tb3po_inst_t *t) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* State persistence — fixed-layout binary format                         */
+/* ---------------------------------------------------------------------- */
+/*
+ * Laid out to survive full-exit teardowns of the module: pattern + all 8
+ * banks + seeds + every knob-tunable param. On tb3po_create() we attempt
+ * to load; on tb3po_destroy() (and on explicit "save_state" requests) we
+ * write. If the file is missing / magic mismatches / version is wrong,
+ * we silently keep the hard-coded defaults. Intentionally NOT saved:
+ * transport follow state, running flag (always re-derived from the host
+ * clock on load), position, pending_recall, undo buffer.
+ */
+static int ensure_state_dir(void) {
+    struct stat st;
+    if (stat(TB3PO_STATE_DIR, &st) == 0 && S_ISDIR(st.st_mode)) return 1;
+    if (mkdir(TB3PO_STATE_DIR, 0755) == 0) return 1;
+    /* Check again in case another process just made it. */
+    return (stat(TB3PO_STATE_DIR, &st) == 0 && S_ISDIR(st.st_mode));
+}
+
+static int tb3po_save_state_locked(const tb3po_inst_t *t) {
+    if (!t) return 0;
+    if (!ensure_state_dir()) return 0;
+    FILE *f = fopen(TB3PO_STATE_PATH, "wb");
+    if (!f) return 0;
+
+    uint32_t magic = TB3PO_STATE_MAGIC;
+    uint32_t ver = TB3PO_STATE_VERSION;
+    fwrite(&magic, sizeof(magic), 1, f);
+    fwrite(&ver,   sizeof(ver),   1, f);
+
+    /* Scalars — match tb3po_load_state() exactly. */
+    int32_t i32;
+    float   fval;
+    uint32_t u32;
+
+    i32 = (int32_t)t->length;         fwrite(&i32, sizeof(i32), 1, f);
+    i32 = (int32_t)t->direction;      fwrite(&i32, sizeof(i32), 1, f);
+    fval = t->density;                fwrite(&fval, sizeof(fval), 1, f);
+    fval = t->accent;                 fwrite(&fval, sizeof(fval), 1, f);
+    fval = t->slide;                  fwrite(&fval, sizeof(fval), 1, f);
+    i32 = (int32_t)t->octave_range;   fwrite(&i32, sizeof(i32), 1, f);
+    i32 = (int32_t)t->root;           fwrite(&i32, sizeof(i32), 1, f);
+    i32 = (int32_t)t->scale;          fwrite(&i32, sizeof(i32), 1, f);
+    fval = t->bpm;                    fwrite(&fval, sizeof(fval), 1, f);
+    fval = t->gate;                   fwrite(&fval, sizeof(fval), 1, f);
+    i32 = (int32_t)t->channel;        fwrite(&i32, sizeof(i32), 1, f);
+    i32 = (int32_t)t->transpose;      fwrite(&i32, sizeof(i32), 1, f);
+    u32 = t->seed;                    fwrite(&u32, sizeof(u32), 1, f);
+    i32 = (int32_t)t->current_bank;   fwrite(&i32, sizeof(i32), 1, f);
+
+    /* Live pattern buffers (MAX_STEPS each). */
+    fwrite(t->steps,   1, MAX_STEPS, f);
+    fwrite(t->degrees, 1, MAX_STEPS, f);
+    fwrite(t->octaves, 1, MAX_STEPS, f);
+
+    /* All 8 banks. */
+    for (int b = 0; b < NUM_BANKS; b++) {
+        fwrite(t->bank_steps[b],   1, MAX_STEPS, f);
+        fwrite(t->bank_degrees[b], 1, MAX_STEPS, f);
+        fwrite(t->bank_octaves[b], 1, MAX_STEPS, f);
+    }
+    fwrite(t->bank_filled, 1, NUM_BANKS, f);
+
+    fclose(f);
+    return 1;
+}
+
+/* Public save entry point. Takes the state mutex so the background worker
+ * and the destroy-instance flush don't race on the same FILE*. */
+static int tb3po_save_state(tb3po_inst_t *t) {
+    if (!t) return 0;
+    pthread_mutex_lock(&t->state_mutex);
+    int ok = tb3po_save_state_locked(t);
+    pthread_mutex_unlock(&t->state_mutex);
+    return ok;
+}
+
+/* Background worker: wake every 2s, check the dirty flag, flush if set.
+ * Sleeping is interruptible because state_thread_stop is checked between
+ * wakes — so destroy_instance can tear us down within ~2s in the worst
+ * case (then the synchronous final save in destroy_instance catches any
+ * edits that happened between the last worker tick and shutdown). */
+static void *tb3po_state_worker(void *arg) {
+    tb3po_inst_t *t = (tb3po_inst_t *)arg;
+    while (!t->state_thread_stop) {
+        /* Sleep in 200ms slices so destroy wakes us promptly. */
+        for (int i = 0; i < 10 && !t->state_thread_stop; i++) {
+            usleep(200 * 1000);
+        }
+        if (t->state_thread_stop) break;
+        if (t->state_dirty) {
+            if (tb3po_save_state(t)) t->state_dirty = 0;
+            /* On failure leave dirty=1 so the next tick retries. */
+        }
+    }
+    return NULL;
+}
+
+static int tb3po_load_state(tb3po_inst_t *t) {
+    if (!t) return 0;
+    FILE *f = fopen(TB3PO_STATE_PATH, "rb");
+    if (!f) return 0;
+
+    uint32_t magic = 0, ver = 0;
+    if (fread(&magic, sizeof(magic), 1, f) != 1 || magic != TB3PO_STATE_MAGIC) {
+        fclose(f); return 0;
+    }
+    if (fread(&ver, sizeof(ver), 1, f) != 1 || ver != TB3PO_STATE_VERSION) {
+        fclose(f); return 0;
+    }
+
+    int32_t i32;
+    float   fval;
+    uint32_t u32;
+    int ok = 1;
+
+#define RD(buf, sz) do { if (fread((buf), (sz), 1, f) != 1) { ok = 0; goto done; } } while (0)
+
+    RD(&i32, sizeof(i32));   t->length       = i32;
+    RD(&i32, sizeof(i32));   t->direction    = i32;
+    RD(&fval, sizeof(fval)); t->density      = fval;
+    RD(&fval, sizeof(fval)); t->accent       = fval;
+    RD(&fval, sizeof(fval)); t->slide        = fval;
+    RD(&i32, sizeof(i32));   t->octave_range = i32;
+    RD(&i32, sizeof(i32));   t->root         = i32;
+    RD(&i32, sizeof(i32));   t->scale        = i32;
+    RD(&fval, sizeof(fval)); t->bpm          = fval;
+    RD(&fval, sizeof(fval)); t->gate         = fval;
+    RD(&i32, sizeof(i32));   t->channel      = i32;
+    RD(&i32, sizeof(i32));   t->transpose    = i32;
+    RD(&u32, sizeof(u32));   t->seed         = u32;
+    RD(&i32, sizeof(i32));   t->current_bank = i32;
+
+    RD(t->steps,   MAX_STEPS);
+    RD(t->degrees, MAX_STEPS);
+    RD(t->octaves, MAX_STEPS);
+
+    for (int b = 0; b < NUM_BANKS; b++) {
+        RD(t->bank_steps[b],   MAX_STEPS);
+        RD(t->bank_degrees[b], MAX_STEPS);
+        RD(t->bank_octaves[b], MAX_STEPS);
+    }
+    RD(t->bank_filled, NUM_BANKS);
+
+#undef RD
+
+done:
+    fclose(f);
+    if (!ok) return 0;
+
+    /* Clamp recovered scalars to known-safe ranges — a corrupt file
+     * shouldn't be able to index past the end of an enum table etc. */
+    if (t->length < 1 || t->length > MAX_STEPS) t->length = 16;
+    if (t->direction < 0 || t->direction > 3) t->direction = 0;
+    if (t->octave_range < 1 || t->octave_range > 3) t->octave_range = 2;
+    if (t->root < 0 || t->root > 11) t->root = 9;
+    if (t->scale < 0 || t->scale >= NUM_SCALES) t->scale = 0;
+    if (t->channel < 1 || t->channel > 16) t->channel = 1;
+    if (t->current_bank < 0 || t->current_bank >= NUM_BANKS) t->current_bank = 0;
+    if (t->density < 0.0f) t->density = 0.0f;
+    if (t->density > 1.0f) t->density = 1.0f;
+    if (t->accent  < 0.0f) t->accent  = 0.0f;
+    if (t->accent  > 1.0f) t->accent  = 1.0f;
+    if (t->slide   < 0.0f) t->slide   = 0.0f;
+    if (t->slide   > 1.0f) t->slide   = 1.0f;
+    if (t->bpm < 20.0f || t->bpm > 400.0f) t->bpm = 120.0f;
+    if (t->gate < 0.1f || t->gate > 1.0f) t->gate = 0.5f;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------- */
 /* Plugin API surface                                                     */
 /* ---------------------------------------------------------------------- */
 
@@ -364,8 +557,29 @@ static void *tb3po_create(const char *module_dir, const char *json_defaults) {
     t->follow_transport = 1;  /* default: follow Move's transport */
     t->prev_clock_status = MOVE_CLOCK_STATUS_UNAVAILABLE;
     t->pending_recall = -1;
+
+    /* Restore persisted state before computing derived values or
+     * generating a pattern — if we load a pattern from disk we don't
+     * want to overwrite it with a fresh random one. */
+    int loaded = tb3po_load_state(t);
+
     recompute_step_length(t);
-    generate_pattern(t, t->seed);
+    if (!loaded) {
+        /* No saved state — seed the default pattern so there's something to hear. */
+        generate_pattern(t, t->seed);
+    }
+    t->position = t->length - 1;  /* reset position regardless */
+
+    /* Initialise the background-saver: the mutex serializes writes, and the
+     * worker thread polls state_dirty every ~2s. It's set detached so a
+     * teardown doesn't leak the thread if pthread_join is skipped. */
+    pthread_mutex_init(&t->state_mutex, NULL);
+    t->state_dirty = 0;
+    t->state_thread_stop = 0;
+    t->state_thread_started = 0;
+    if (pthread_create(&t->state_thread, NULL, tb3po_state_worker, t) == 0) {
+        t->state_thread_started = 1;
+    }
     return t;
 }
 
@@ -380,6 +594,16 @@ static void tb3po_destroy(void *inst) {
         send_midi(t, 0xB0 | ch, 123, 0);
         t->portamento_on = 0;
     }
+    /* Stop the background saver before tearing everything else down.
+     * Set the stop flag, join (worker wakes within ~200ms), then do one
+     * last synchronous save to catch edits that happened between the
+     * worker's last tick and now. */
+    t->state_thread_stop = 1;
+    if (t->state_thread_started) {
+        pthread_join(t->state_thread, NULL);
+    }
+    tb3po_save_state(t);
+    pthread_mutex_destroy(&t->state_mutex);
     free(t);
 }
 
@@ -460,9 +684,13 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
     else if (strcmp(key, "channel") == 0) { int c = parse_int(val, 1); if (c < 1) c = 1; if (c > 16) c = 16; t->channel = c; }
     else if (strcmp(key, "transpose") == 0) { int s = parse_int(val, 0); if (s < -48) s = -48; if (s > 48) s = 48; t->transpose = s; }
     else if (strcmp(key, "direction") == 0) t->direction = parse_int(val, 0) & 3;
-    else if (strcmp(key, "seed") == 0)    { t->seed = (uint32_t)parse_int(val, 0xBEEF); generate_pattern(t, t->seed); t->position = t->length - 1; }
-    else if (strcmp(key, "generate") == 0) { snapshot_undo(t); t->seed = rng_next_u32(t); generate_pattern(t, t->seed); t->position = t->length - 1; }
-    else if (strcmp(key, "regen") == 0)    { snapshot_undo(t); generate_pattern(t, t->seed); t->position = t->length - 1; }
+    /* generate/regen/seed rewrite the pattern in place — keep the current
+     * playhead so the sequence stays bar-aligned with whatever other tracks
+     * the user is running against Move's transport. Otherwise pressing NEW
+     * mid-bar snapped us back to step 0 and knocked tb3po out of phase. */
+    else if (strcmp(key, "seed") == 0)    { t->seed = (uint32_t)parse_int(val, 0xBEEF); generate_pattern(t, t->seed); }
+    else if (strcmp(key, "generate") == 0) { snapshot_undo(t); t->seed = rng_next_u32(t); generate_pattern(t, t->seed); }
+    else if (strcmp(key, "regen") == 0)    { snapshot_undo(t); generate_pattern(t, t->seed); }
     else if (strcmp(key, "mutate") == 0)   { snapshot_undo(t); mutate_pattern(t); }
     else if (strcmp(key, "clear") == 0)    { snapshot_undo(t); for (int i = 0; i < MAX_STEPS; i++) t->steps[i] = STEP_REST; t->steps[0] = STEP_NOTE; }
     else if (strcmp(key, "undo") == 0)     restore_undo(t);
@@ -519,6 +747,11 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
     else if (strcmp(key, "follow_transport") == 0) {
         t->follow_transport = parse_int(val, 1) ? 1 : 0;
     }
+
+    /* Any set_param that lands here changed persisted (or paranoid-safe to
+     * resave) state. Mark dirty — render_block will flush the file a few
+     * seconds later, batching rapid edits into a single write. */
+    t->state_dirty = 1;
 }
 
 static int tb3po_get_param(void *inst, const char *key, char *buf, int buf_len) {
@@ -583,6 +816,7 @@ static void tb3po_render_block(void *inst, int16_t *out_lr, int frames) {
     /* No audio output — this is a MIDI generator. */
     if (out_lr && frames > 0) memset(out_lr, 0, sizeof(int16_t) * frames * 2);
     if (!t) return;
+
 
     /* Pulse-driven sync: on_midi now advances steps directly as 0xF8 pulses
      * arrive (same audio thread as render_block). Here we just age out
