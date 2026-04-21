@@ -4,7 +4,6 @@ import {
     showOverlay, tickOverlay, drawOverlay, hideOverlay
 } from '/data/UserData/schwung/shared/menu_layout.mjs';
 import {
-    decodeAcceleratedDelta, resetAllEncoderAccel,
     setLED as sharedSetLED, setButtonLED as sharedSetButtonLED
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 import { createValue, createEnum } from '/data/UserData/schwung/shared/menu_items.mjs';
@@ -55,9 +54,14 @@ const CC_303_LABELS = ["Cut", "Res", "Dec", "Env", "Acc", "Vol", "OvL", "OvW"];
 const PAGE_PERFORM = 0;
 const PAGE_MUTATION = 1;
 const PAGE_SCALE = 2;
-const PAGE_HELP = 3;
-const NUM_PAGES = 4;
-const PAGE_NAMES = ["PERFORM", "MUTATION", "SCALE", "HELP"];
+const PAGE_CHANNEL = 3;
+const PAGE_HELP = 4;
+const NUM_PAGES = 5;
+const PAGE_NAMES_3PO = ["PERFORM", "MUTATION", "SCALE", "CHANNEL", "HELP"];
+const PAGE_NAMES_303 = ["PERFORM", "303 Control 1", "303 Control 2", "CHANNEL", "HELP"];
+function pageName(idx) {
+    return (controlMode === MODE_303 ? PAGE_NAMES_303 : PAGE_NAMES_3PO)[idx] || "?";
+}
 
 // LED palette — values are Move's note velocities (see shared/constants.mjs).
 const LED_OFF       = 0;
@@ -107,7 +111,8 @@ let stepView = 0;   // which 16-step window of the pattern is shown (0 or 1)
 // buffer) because most params have immediate audible effect.
 const menuState = {
     [PAGE_MUTATION]: { selectedIndex: 0, editing: false },
-    [PAGE_SCALE]:    { selectedIndex: 0, editing: false }
+    [PAGE_SCALE]:    { selectedIndex: 0, editing: false },
+    [PAGE_CHANNEL]:  { selectedIndex: 0, editing: false }
 };
 
 function stepPageCount() { return Math.max(1, Math.ceil(ui.length / 16)); }
@@ -183,12 +188,36 @@ function pollDsp() {
 
 // -------- Knob handling ----------
 
-// Local helper kept for any plain-delta path. All knob handlers now use
-// decodeAcceleratedDelta from input_filter.mjs so fast turns scale up.
+// Shadow UI batches encoder ticks per frame (~22ms) and encodes the
+// accumulated count as the CC value (CW = 1..63, CCW = 65..127). That
+// accumulated count is already speed-proportional — turning faster
+// delivers a bigger count per frame. So we use the raw signed count
+// directly and scale it by a per-context gain constant below; running
+// it through decodeAcceleratedDelta() on top double-counted speed and
+// felt twitchy.
 function decodeDelta(value) {
     if (value === 0 || value === 64) return 0;
     if (value <= 63) return value;
     return -(128 - value);
+}
+
+// Global knob-gain factors — raise to sweep faster, lower for fine.
+// 3PO param knobs (density/accent/slide/octaves on page, root/scale/
+// length/gate on scale page). 1.0 = each encoder tick ≈ one unit.
+const KNOB_GAIN_3PO = 1.0;
+// 303 mode: each encoder tick nudges the CC by this many units. 303
+// params read 0–127 so we want a slightly coarser sweep than 3PO.
+const KNOB_GAIN_303 = 1.5;
+// Jog while in value-edit mode (MUTATION/SCALE/CHANNEL pages).
+const JOG_EDIT_GAIN = 1.0;
+
+function scaleDelta(raw, gain) {
+    if (raw === 0 || gain === 0) return 0;
+    const scaled = raw * gain;
+    // Preserve at least one unit of motion so a slow turn still registers.
+    if (scaled > 0 && scaled < 1) return 1;
+    if (scaled < 0 && scaled > -1) return -1;
+    return Math.round(scaled);
 }
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -201,8 +230,31 @@ function adjustFloat(key, uiKey, delta, step, lo, hi) {
     }
 }
 
+// Detent-step accumulator: small, discrete-set params (enums, short int
+// ranges) should take several encoder clicks to advance one step so
+// they don't whip through values. Drain `delta` into an accumulator
+// and return whole steps when the threshold is crossed.
+const DETENTS_PER_STEP = 4;
+const detentAccum = {};  // keyed by uiKey
+
+function consumeDetents(uiKey, delta) {
+    if (delta === 0) return 0;
+    const acc = (detentAccum[uiKey] || 0) + delta;
+    const steps = (acc > 0)
+        ? Math.floor(acc / DETENTS_PER_STEP)
+        : -Math.floor(-acc / DETENTS_PER_STEP);
+    detentAccum[uiKey] = acc - steps * DETENTS_PER_STEP;
+    return steps;
+}
+
+function resetDetents(uiKey) {
+    detentAccum[uiKey] = 0;
+}
+
 function adjustInt(key, uiKey, delta, lo, hi) {
-    const next = clamp((ui[uiKey] | 0) + delta, lo, hi);
+    const steps = consumeDetents(uiKey, delta);
+    if (steps === 0) return;
+    const next = clamp((ui[uiKey] | 0) + steps, lo, hi);
     if (next !== ui[uiKey]) {
         ui[uiKey] = next;
         setDspParam(key, String(next));
@@ -210,7 +262,9 @@ function adjustInt(key, uiKey, delta, lo, hi) {
 }
 
 function adjustEnum(key, uiKey, delta, count) {
-    const next = ((ui[uiKey] | 0) + delta + count * 10) % count;  // +10*count guards against large negative deltas
+    const steps = consumeDetents(uiKey, delta);
+    if (steps === 0) return;
+    const next = ((ui[uiKey] | 0) + steps + count * 100) % count;
     if (next !== ui[uiKey]) {
         ui[uiKey] = next;
         setDspParam(key, String(next));
@@ -218,8 +272,11 @@ function adjustEnum(key, uiKey, delta, count) {
 }
 
 function adjustLength(delta) {
+    const steps = consumeDetents("length", delta);
+    if (steps === 0) return;
     const idx = LENGTHS.indexOf(ui.length);
-    const next = LENGTHS[clamp((idx < 0 ? 1 : idx) + (delta > 0 ? 1 : -1), 0, LENGTHS.length - 1)];
+    const cur = idx < 0 ? 1 : idx;
+    const next = LENGTHS[clamp(cur + steps, 0, LENGTHS.length - 1)];
     if (next !== ui.length) {
         ui.length = next;
         setDspParam("length", String(next));
@@ -234,24 +291,24 @@ let patternStale = false;  // true when prob-knobs have changed since last gener
 
 function scalePageItems() {
     return [
-        createEnum("Root", {
+        createEnum("K5: Root", {
             get: () => ui.root,
             set: (v) => { ui.root = v; setDspParam("root", String(v)); },
             options: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             format: (v) => ROOT_NAMES[v] || "?"
         }),
-        createEnum("Scale", {
+        createEnum("K6: Scale", {
             get: () => ui.scale,
             set: (v) => { ui.scale = v; setDspParam("scale", String(v)); },
             options: SCALE_NAMES.map((_, i) => i),
             format: (v) => SCALE_NAMES[v] || "?"
         }),
-        createEnum("Length", {
+        createEnum("K7: Length", {
             get: () => ui.length,
             set: (v) => { ui.length = v; setDspParam("length", String(v)); },
             options: LENGTHS
         }),
-        createValue("Gate", {
+        createValue("K8: Gate", {
             get: () => Math.round(ui.gate * 100),
             set: (v) => { ui.gate = v / 100; setDspParam("gate", (v / 100).toFixed(3)); },
             min: 10, max: 100,
@@ -263,22 +320,22 @@ function scalePageItems() {
 function mutationPageItems() {
     const setStale = () => { patternStale = true; };
     return [
-        createValue("Density", {
+        createValue("K1: Density", {
             get: () => Math.round(ui.density * 100),
             set: (v) => { ui.density = v / 100; setDspParam("density", (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
-        createValue("Accent", {
+        createValue("K2: Accent", {
             get: () => Math.round(ui.accent * 100),
             set: (v) => { ui.accent = v / 100; setDspParam("accent", (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
-        createValue("Slide", {
+        createValue("K3: Slide", {
             get: () => Math.round(ui.slide * 100),
             set: (v) => { ui.slide = v / 100; setDspParam("slide", (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
-        createValue("Octaves", {
+        createValue("K4: Octaves", {
             get: () => ui.octaves,
             set: (v) => { ui.octaves = v; setDspParam("octaves", String(v)); setStale(); },
             min: 1, max: 3
@@ -286,9 +343,20 @@ function mutationPageItems() {
     ];
 }
 
+function channelPageItems() {
+    return [
+        createValue("MIDI Ch", {
+            get: () => ui.channel,
+            set: (v) => { ui.channel = v; setDspParam("channel", String(v)); },
+            min: 1, max: 16
+        })
+    ];
+}
+
 function currentPageItems() {
     if (currentPage === PAGE_SCALE)    return scalePageItems();
     if (currentPage === PAGE_MUTATION) return mutationPageItems();
+    if (currentPage === PAGE_CHANNEL)  return channelPageItems();
     return null;
 }
 
@@ -296,14 +364,24 @@ function adjustMenuItem(item, delta) {
     if (!item || delta === 0 || !item.set || !item.get) return;
     const cur = item.get();
     if (item.type === "value") {
-        const next = clamp(cur + delta, item.min, item.max);
+        // Short-range values (octaves 1..3, MIDI ch 1..16) would whip through
+        // on a plain detent-to-unit mapping, so drain through the same
+        // detent accumulator used by the knob enum path.
+        const range = (item.max | 0) - (item.min | 0);
+        const useDetents = range <= 16;
+        const steps = useDetents
+            ? consumeDetents("menu:" + item.label, delta)
+            : delta;
+        if (steps === 0) return;
+        const next = clamp(cur + steps, item.min, item.max);
         if (next !== cur) item.set(next);
     } else if (item.type === "enum") {
         const opts = item.options || [];
         if (opts.length === 0) return;
+        const steps = consumeDetents("menu:" + item.label, delta);
+        if (steps === 0) return;
         const idx = opts.indexOf(cur);
-        const sign = delta > 0 ? 1 : -1;
-        const newIdx = (idx < 0 ? 0 : (idx + sign + opts.length)) % opts.length;
+        const newIdx = ((idx < 0 ? 0 : idx) + steps + opts.length * 100) % opts.length;
         const next = opts[newIdx];
         if (next !== cur) item.set(next);
     }
@@ -684,7 +762,7 @@ function drawBar(y, label, frac, valStr) {
 function drawPageFooter(y) {
     if (typeof print !== "function") return;
     // "Page 1 PERFORM" — just name the current page and offer step hint.
-    print(0, y, "Page " + (currentPage + 1) + " " + PAGE_NAMES[currentPage], 1);
+    print(0, y, "Page " + (currentPage + 1) + " " + pageName(currentPage), 1);
 }
 
 function drawPerformPage() {
@@ -738,17 +816,13 @@ function drawMenuList(items, state, startY) {
 
 function drawMutationPage() {
     if (controlMode === MODE_303) {
-        // 303 mode — 8 knobs in a two-column list with full labels.
+        // 303 mode — knobs 1-4 map to Cutoff/Reson/Decay/EnvMod.
         if (typeof print !== "function") return;
-        const full = ["Cutoff", "Reson", "Decay", "EnvMod", "Accent", "Volume", "Ovdrv", "OvdMix"];
-        print(0, 0, "MUTATION (knobs: 303)", 1);
-        for (let k = 0; k < 8; k++) {
-            const row = k % 4;
-            const leftCol = k < 4;
-            const x = leftCol ? 0 : 64;
-            const y = 14 + row * 10;
-            print(x, y, "K" + (k + 1) + " " + full[k] + ":" + cc303Values[k], 1);
-        }
+        print(0, 0, "303 Control 1 (K1-K4)", 1);
+        print(0, 14, "K1 Cutoff: " + cc303Values[0], 1);
+        print(0, 24, "K2 Reson:  " + cc303Values[1], 1);
+        print(0, 34, "K3 Decay:  " + cc303Values[2], 1);
+        print(0, 44, "K4 EnvMod: " + cc303Values[3], 1);
         print(0, 56, "T1 to return to 3PO", 1);
         return;
     }
@@ -764,9 +838,8 @@ function drawMutationPage() {
 function drawScalePage() {
     if (typeof print !== "function") return;
     if (controlMode === MODE_303) {
-        // Knobs 5-8 aren't scale knobs in 303 mode — they're Accent / Volume /
-        // Overdrive Lvl / Overdrive Mix. Show those with their current CC values.
-        print(0, 0,  "SCALE  (knobs: 303)", 1);
+        // 303 mode — knobs 5-8 map to Accent/Volume/Ovdrv/Ovdrv Mix.
+        print(0, 0,  "303 Control 2 (K5-K8)", 1);
         print(0, 14, "K5 Accent:    " + cc303Values[4], 1);
         print(0, 24, "K6 Volume:    " + cc303Values[5], 1);
         print(0, 34, "K7 Overdrive: " + cc303Values[6], 1);
@@ -777,6 +850,13 @@ function drawScalePage() {
     print(0, 0, "SCALE", 1);
     drawMenuList(scalePageItems(), menuState[PAGE_SCALE], 14);
     print(0, 56, "Jog nav/edit  Knobs 5-8", 1);
+}
+
+function drawChannelPage() {
+    if (typeof print !== "function") return;
+    print(0, 0, "MIDI CHANNEL", 1);
+    drawMenuList(channelPageItems(), menuState[PAGE_CHANNEL], 20);
+    print(0, 56, "Jog nav/edit", 1);
 }
 
 function drawHelpPage() {
@@ -796,6 +876,7 @@ function draw() {
     switch (currentPage) {
         case PAGE_MUTATION: drawMutationPage(); break;
         case PAGE_SCALE:    drawScalePage();    break;
+        case PAGE_CHANNEL:  drawChannelPage();  break;
         case PAGE_HELP:     drawHelpPage();     break;
         default:            drawPerformPage();
     }
@@ -924,29 +1005,37 @@ globalThis.onMidiMessageInternal = function(data) {
     // Knob deltas arrive as synthetic CC messages (CC 71-78).
     if (type === 0xB0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
         const knobIdx = d1 - CC_KNOB_BASE;
-        // Accelerated: turning fast yields bigger deltas, so sweeps across
-        // Root / Scale / values feel smooth instead of one-click-at-a-time.
-        handleKnob(knobIdx, decodeAcceleratedDelta(d2, knobIdx));
+        const raw = decodeDelta(d2);
+        const gain = (controlMode === MODE_303) ? KNOB_GAIN_303 : KNOB_GAIN_3PO;
+        handleKnob(knobIdx, scaleDelta(raw, gain));
         return;
     }
 
-    // Jog wheel (CC 14) — menu navigation / value editing on MUTATION & SCALE.
+    // Jog wheel (CC 14) — menu navigation / value editing.
+    // CHANNEL works in both knob modes (MIDI channel affects output either way);
+    // MUTATION and SCALE only in 3PO mode since 303 mode reuses those pages
+    // to show the live CC readouts.
     if (type === 0xB0 && d1 === 14) {
-        if (controlMode !== MODE_3PO) return;
-        if (currentPage !== PAGE_MUTATION && currentPage !== PAGE_SCALE) return;
+        const on3poMenu = controlMode === MODE_3PO &&
+            (currentPage === PAGE_MUTATION || currentPage === PAGE_SCALE);
+        const onChannel = currentPage === PAGE_CHANNEL;
+        if (!on3poMenu && !onChannel) return;
         const state = menuState[currentPage];
         if (!state) return;
-        const delta = state.editing
-            ? decodeAcceleratedDelta(d2, "jog_edit")
-            : decodeDelta(d2);
+        // Nav mode: 1 detent = 1 row (no acceleration, prevents overshoot on
+        // short lists). Edit mode: gain-scaled so fast spins sweep quickly.
+        const raw = decodeDelta(d2);
+        const delta = state.editing ? scaleDelta(raw, JOG_EDIT_GAIN) : raw;
         handleJogTurn(delta);
         return;
     }
 
     // Jog click (CC 3, main button) — enter/confirm edit.
     if (type === 0xB0 && d1 === 3 && d2 > 0) {
-        if (controlMode !== MODE_3PO) return;
-        if (currentPage !== PAGE_MUTATION && currentPage !== PAGE_SCALE) return;
+        const on3poMenu = controlMode === MODE_3PO &&
+            (currentPage === PAGE_MUTATION || currentPage === PAGE_SCALE);
+        const onChannel = currentPage === PAGE_CHANNEL;
+        if (!on3poMenu && !onChannel) return;
         handleJogClick();
         return;
     }
