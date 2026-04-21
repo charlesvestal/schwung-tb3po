@@ -13,6 +13,7 @@
     },
     "capabilities": {
         "midi_out": true,
-        "suspend_keeps_js": true
+        "suspend_keeps_js": true,
+        "preserve_hw_button_leds": true
     }
 }
