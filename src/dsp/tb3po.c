@@ -35,6 +35,20 @@ static const scale_t SCALES[] = {
 typedef struct tb3po_inst {
     const host_api_v1_t *host;
 
+    /* Host transport tracking (polled from render_block a few times a second). */
+    int poll_counter;
+    float host_bpm;
+    int host_clock_status;
+    int prev_clock_status;
+    int follow_transport;   /* 1 = start/stop with Move's transport; 0 = free run */
+
+    /* MIDI-clock pulse sync: when the shim delivers 0xF8 pulses, we advance on
+     * every 6th pulse for sample-accurate 16ths, completely bypassing the
+     * internal sample-accumulator. Falls back to internal if no pulses arrive. */
+    int pulse_sync_active;
+    long pulses_since_block;    /* pulses seen since start of this render_block */
+    long blocks_since_last_pulse;
+
     /* PRNG — xorshift32 */
     uint32_t rng;
 
@@ -64,6 +78,7 @@ typedef struct tb3po_inst {
     double sample_accum; /* fractional progress within current step */
     long gate_samples_remaining;
     int channel;         /* 1..16 */
+    int transpose;       /* semitones added to every emitted note */
 
     /* Playback */
     int running;
@@ -74,6 +89,7 @@ typedef struct tb3po_inst {
     /* Banks + seed */
     uint32_t seed;
     int current_bank;
+    int pending_recall;   /* -1 = nothing queued; >=0 = bank to recall at next bar */
     uint8_t bank_steps[NUM_BANKS][MAX_STEPS];
     uint8_t bank_degrees[NUM_BANKS][MAX_STEPS];
     uint8_t bank_octaves[NUM_BANKS][MAX_STEPS];
@@ -189,8 +205,11 @@ static void mutate_pattern(tb3po_inst_t *t) {
 
 static int note_for_step(const tb3po_inst_t *t, int i) {
     const scale_t *sc = &SCALES[t->scale];
-    int base = 36 + t->root;  /* two octaves below middle C */
-    int note = base + sc->degrees[t->degrees[i]] + 12 * t->octaves[i];
+    /* Base in the C1 octave — three octaves below middle C. With root offset
+     * 0..11 plus scale degrees up to 11 plus octave range up to 24, the max
+     * emitted note stays below Move's pad-LED range (notes 68-99). */
+    int base = 24 + t->root;
+    int note = base + sc->degrees[t->degrees[i]] + 12 * t->octaves[i] + t->transpose;
     if (note < 0) note = 0;
     if (note > 127) note = 127;
     return note;
@@ -268,6 +287,19 @@ static int next_position(tb3po_inst_t *t) {
 static void advance_step(tb3po_inst_t *t) {
     int prev = t->position;
     int n = next_position(t);
+    /* At bar boundaries (position wraps to 0 on a forward pass), honour a
+     * queued bank recall so pattern switches happen musically rather than
+     * mid-phrase. */
+    if (n == 0 && t->pending_recall >= 0 && t->pending_recall < NUM_BANKS) {
+        int b = t->pending_recall;
+        if (t->bank_filled[b]) {
+            memcpy(t->steps, t->bank_steps[b], MAX_STEPS);
+            memcpy(t->degrees, t->bank_degrees[b], MAX_STEPS);
+            memcpy(t->octaves, t->bank_octaves[b], MAX_STEPS);
+            t->current_bank = b;
+        }
+        t->pending_recall = -1;
+    }
     t->position = n;
     t->ui_current_step = n;
     emit_step(t, prev, n);
@@ -301,6 +333,9 @@ static void *tb3po_create(const char *module_dir, const char *json_defaults) {
     t->last_note_on = -1;
     t->position = t->length - 1;  /* first advance lands on 0 */
     t->pingpong_dir = 1;
+    t->follow_transport = 1;  /* default: follow Move's transport */
+    t->prev_clock_status = MOVE_CLOCK_STATUS_UNAVAILABLE;
+    t->pending_recall = -1;
     recompute_step_length(t);
     generate_pattern(t, t->seed);
     return t;
@@ -326,13 +361,49 @@ static void tb3po_on_midi(void *inst, const uint8_t *msg, int len, int source) {
     if (!t || !msg || len < 1) return;
     uint8_t status = msg[0];
     if (status == 0xF8) {
-        /* 24 PPQN — every 6th pulse is a 16th. */
-        t->clock_pulses = (t->clock_pulses + 1) % 6;
-        if (t->sync == 1 && t->clock_pulses == 0 && t->running) advance_step(t);
+        /* MIDI clock tick (24 PPQN). Advance immediately here rather than
+         * accumulating into a per-block counter — on_midi runs on the same
+         * audio thread as render_block, so emitting MIDI from here is safe
+         * and avoids a ~2.9 ms block of jitter. */
+        t->pulse_sync_active = 1;
+        t->blocks_since_last_pulse = 0;
+        if (t->running) {
+            t->clock_pulses = (t->clock_pulses + 1) % 6;
+            if (t->clock_pulses == 0) advance_step(t);
+        }
         return;
     }
-    if (status == 0xFA) { t->running = 1; t->position = t->length - 1; t->clock_pulses = 0; return; }
-    if (status == 0xFC) { t->running = 0; kill_last_note(t); return; }
+    if (status == 0xFA) {
+        /* Start — park clock_pulses at 5 so the very first 0xF8 bumps it to
+         * 0 and fires step 0 on the downbeat (the MIDI convention). Before
+         * this, clock_pulses started at 0 which meant the first step didn't
+         * fire until the 6th pulse — one full 16th late. */
+        if (t->follow_transport) {
+            t->running = 1;
+            t->position = t->length - 1;  /* next advance lands on 0 */
+            t->clock_pulses = 5;
+            t->sample_accum = 0;
+        }
+        return;
+    }
+    if (status == 0xFB) {
+        /* Continue — resume without resetting position/clock_pulses. */
+        if (t->follow_transport) t->running = 1;
+        return;
+    }
+    if (status == 0xFC) {
+        /* Stop — release notes. */
+        if (t->follow_transport) {
+            t->running = 0;
+            kill_last_note(t);
+            if (t->portamento_on) {
+                uint8_t ch = (uint8_t)((t->channel - 1) & 0x0F);
+                send_midi(t, 0xB0 | ch, 65, 0);
+                t->portamento_on = 0;
+            }
+        }
+        return;
+    }
     /* Other MIDI ignored for now. */
 }
 
@@ -359,9 +430,11 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
     else if (strcmp(key, "bpm") == 0)     { t->bpm = parse_float(val, 120.0f); if (t->bpm < 20.0f) t->bpm = 20.0f; if (t->bpm > 400.0f) t->bpm = 400.0f; recompute_step_length(t); }
     else if (strcmp(key, "sync") == 0)    t->sync = parse_int(val, 0) ? 1 : 0;
     else if (strcmp(key, "channel") == 0) { int c = parse_int(val, 1); if (c < 1) c = 1; if (c > 16) c = 16; t->channel = c; }
+    else if (strcmp(key, "transpose") == 0) { int s = parse_int(val, 0); if (s < -48) s = -48; if (s > 48) s = 48; t->transpose = s; }
     else if (strcmp(key, "direction") == 0) t->direction = parse_int(val, 0) & 3;
     else if (strcmp(key, "seed") == 0)    { t->seed = (uint32_t)parse_int(val, 0xBEEF); generate_pattern(t, t->seed); t->position = t->length - 1; }
-    else if (strcmp(key, "generate") == 0) { t->seed = (uint32_t)(parse_int(val, 0) | rng_next_u32(t)); generate_pattern(t, t->seed); t->position = t->length - 1; }
+    else if (strcmp(key, "generate") == 0) { t->seed = rng_next_u32(t); generate_pattern(t, t->seed); t->position = t->length - 1; }
+    else if (strcmp(key, "regen") == 0)    { generate_pattern(t, t->seed); t->position = t->length - 1; }  /* same seed, re-apply probs */
     else if (strcmp(key, "mutate") == 0)  mutate_pattern(t);
     else if (strcmp(key, "clear") == 0)   { for (int i = 0; i < MAX_STEPS; i++) t->steps[i] = STEP_REST; t->steps[0] = STEP_NOTE; }
     else if (strcmp(key, "store_bank") == 0) {
@@ -377,11 +450,21 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
     else if (strcmp(key, "recall_bank") == 0) {
         int b = parse_int(val, 0);
         if (b >= 0 && b < NUM_BANKS && t->bank_filled[b]) {
+            /* Queue the recall. It will apply on the next bar boundary inside
+             * advance_step so pattern switches line up musically. */
+            t->pending_recall = b;
+        }
+    }
+    else if (strcmp(key, "recall_bank_now") == 0) {
+        /* Escape hatch: apply immediately (e.g. when transport is stopped and
+         * there's no bar boundary coming). */
+        int b = parse_int(val, 0);
+        if (b >= 0 && b < NUM_BANKS && t->bank_filled[b]) {
             memcpy(t->steps, t->bank_steps[b], MAX_STEPS);
             memcpy(t->degrees, t->bank_degrees[b], MAX_STEPS);
             memcpy(t->octaves, t->bank_octaves[b], MAX_STEPS);
             t->current_bank = b;
-            t->position = t->length - 1;
+            t->pending_recall = -1;
         }
     }
     else if (strcmp(key, "running") == 0) {
@@ -398,7 +481,14 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
             t->steps[idx] = (uint8_t)(kind & 3);
             if (n >= 3) t->degrees[idx] = (uint8_t)deg;
             if (n >= 4) t->octaves[idx] = (uint8_t)oct;
+            if (t->host && t->host->log) {
+                char m[64]; snprintf(m, sizeof(m), "tb3po set_step idx=%d kind=%d", idx, kind);
+                t->host->log(m);
+            }
         }
+    }
+    else if (strcmp(key, "follow_transport") == 0) {
+        t->follow_transport = parse_int(val, 1) ? 1 : 0;
     }
 }
 
@@ -418,10 +508,22 @@ static int tb3po_get_param(void *inst, const char *key, char *buf, int buf_len) 
     else if (strcmp(key, "bpm") == 0)        n = snprintf(buf, buf_len, "%.1f", t->bpm);
     else if (strcmp(key, "sync") == 0)       n = snprintf(buf, buf_len, "%d", t->sync);
     else if (strcmp(key, "channel") == 0)    n = snprintf(buf, buf_len, "%d", t->channel);
+    else if (strcmp(key, "transpose") == 0)  n = snprintf(buf, buf_len, "%d", t->transpose);
     else if (strcmp(key, "direction") == 0)  n = snprintf(buf, buf_len, "%d", t->direction);
     else if (strcmp(key, "seed") == 0)       n = snprintf(buf, buf_len, "%u", (unsigned)t->seed);
     else if (strcmp(key, "current_bank") == 0) n = snprintf(buf, buf_len, "%d", t->current_bank);
+    else if (strcmp(key, "pending_recall") == 0) n = snprintf(buf, buf_len, "%d", t->pending_recall);
+    else if (strcmp(key, "bank_filled") == 0) {
+        int off = 0;
+        for (int i = 0; i < NUM_BANKS && off < buf_len - 1; i++) {
+            buf[off++] = t->bank_filled[i] ? '1' : '0';
+        }
+        buf[off] = '\0';
+        n = off;
+    }
     else if (strcmp(key, "running") == 0)    n = snprintf(buf, buf_len, "%d", t->running ? 1 : 0);
+    else if (strcmp(key, "follow_transport") == 0) n = snprintf(buf, buf_len, "%d", t->follow_transport ? 1 : 0);
+    else if (strcmp(key, "clock_status") == 0) n = snprintf(buf, buf_len, "%d", t->host_clock_status);
     else if (strcmp(key, "pattern") == 0) {
         /* Compact row: "len|steps|degs|octs" — pipe-separated, each is comma-separated ints. */
         int off = 0;
@@ -450,14 +552,45 @@ static void tb3po_render_block(void *inst, int16_t *out_lr, int frames) {
     tb3po_inst_t *t = (tb3po_inst_t *)inst;
     /* No audio output — this is a MIDI generator. */
     if (out_lr && frames > 0) memset(out_lr, 0, sizeof(int16_t) * frames * 2);
-    if (!t || !t->running) return;
-    if (t->sync == 1) return;  /* External clock: advance driven by on_midi 0xF8. */
+    if (!t) return;
 
-    /* Consume `frames` samples of step progress. */
-    t->sample_accum += (double)frames;
-    while (t->sample_accum >= t->samples_per_step) {
-        t->sample_accum -= t->samples_per_step;
-        advance_step(t);
+    /* Pulse-driven sync: on_midi now advances steps directly as 0xF8 pulses
+     * arrive (same audio thread as render_block). Here we just age out
+     * pulse_sync_active if clock pulses stop, so we fall back to the internal
+     * timer after ~580 ms of silence. */
+    if (t->pulse_sync_active) {
+        t->blocks_since_last_pulse++;
+        if (t->blocks_since_last_pulse > 200) {
+            t->pulse_sync_active = 0;
+            t->clock_pulses = 0;
+        }
+        t->sample_accum = 0;
+    }
+
+    /* === BPM polling (for internal-timer mode) =========================== */
+    if ((++t->poll_counter & 0x1F) == 0 && t->host && t->host->get_bpm) {
+        float hb = t->host->get_bpm();
+        if (hb > 20.0f && hb < 400.0f && hb != t->host_bpm) {
+            t->host_bpm = hb;
+            t->bpm = hb;
+            recompute_step_length(t);
+        }
+    }
+
+    /* (Transport follow is now driven purely by the explicit 0xFA/0xFB/0xFC
+     * messages delivered by the shim in on_midi — no polling get_clock_status,
+     * which raced with the MIDI path and caused the "sometimes stops / sometimes
+     * restarts" glitches.) */
+
+    if (!t->running) return;
+
+    /* === Internal timer mode (no clock pulses) ============================ */
+    if (!t->pulse_sync_active) {
+        t->sample_accum += (double)frames;
+        while (t->sample_accum >= t->samples_per_step) {
+            t->sample_accum -= t->samples_per_step;
+            advance_step(t);
+        }
     }
 
     /* Gate off after gate_samples_remaining elapses, unless next step is slide. */

@@ -1,0 +1,70 @@
+{
+    "title": "TB-3PO",
+    "subtitle": "Generative 303-style acid sequencer",
+    "sections": [
+        {
+            "heading": "Routing",
+            "body": [
+                "TB-3PO emits MIDI on a configurable channel (1–16).",
+                "Load a synth into a shadow slot (hush1, Bristol, OB-Xd, Moog, …)",
+                "and set the slot's receive channel to match TB-3PO's channel to hear it."
+            ]
+        },
+        {
+            "heading": "Knobs",
+            "body": [
+                "1  Density    — chance of a note vs a rest per step",
+                "2  Accent     — chance of a note being an accent (loud)",
+                "3  Slide      — chance of a note sliding into the next",
+                "4  Octaves    — octave range to spread notes across (1–3)",
+                "5  Root       — key root (C, C#, …, B)",
+                "6  Scale      — Minor / Phrygian / HarmMinor / MinPent / Dorian / Major",
+                "7  Length     — pattern length (8, 16, 24, 32 steps)",
+                "8  Gate       — note length as % of step time"
+            ]
+        },
+        {
+            "heading": "Pads (4 rows, bottom = row 1)",
+            "body": [
+                "Row 4 (top): steps 1–8. Tap cycles rest → note → accent → slide.",
+                "Row 3:       steps 9–16 (for patterns longer than 8).",
+                "Row 2:       pattern banks 1–8. Tap to recall, Shift+tap to store.",
+                "Row 1:       actions, left to right:",
+                "  New     regenerate pattern from a fresh seed",
+                "  Mutate  nudge ~25% of existing steps",
+                "  Dir     cycle direction: Fwd / Rev / Ping / Rnd",
+                "  Clear   clear all steps",
+                "  Stop    stop the sequencer",
+                "  Play    start the sequencer",
+                "  Ch−/Ch+ decrement / increment MIDI out channel"
+            ]
+        },
+        {
+            "heading": "LED colors",
+            "body": [
+                "Step pads: white=note, red=accent, blue=slide, off=rest.",
+                "Current step blinks yellow as playback moves through the pattern.",
+                "Bank row: purple = current bank, grey = other banks.",
+                "Action row: teal=New, indigo=Mutate, orange=Dir, pink=Clear, red=Stop, green=Play."
+            ]
+        },
+        {
+            "heading": "Suspend & exit",
+            "body": [
+                "Back            hide TB-3PO and keep sequencing in the background.",
+                "Shift+Back      fully exit (release notes, unload).",
+                "Shift+Vol+Back  also suspend (host-level escape).",
+                "Shift+Vol+Jog   also full exit.",
+                "Re-open from the Tools menu → resume with pattern + position intact."
+            ]
+        },
+        {
+            "heading": "Sync",
+            "body": [
+                "Tempo follows Move's project BPM automatically.",
+                "TB-3PO runs free (not gated by Move's transport) — use the Play/Stop",
+                "pads to start/stop."
+            ]
+        }
+    ]
+}
