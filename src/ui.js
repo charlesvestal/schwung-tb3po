@@ -128,6 +128,12 @@ function clampStepView()  { const m = stepPageCount() - 1; if (cur().stepView > 
 
 // -------- DSP bridge ----------
 
+// Per-slot DSP params are namespaced with "a." / "b." prefixes so one DSP
+// instance can host two independent slots (Task 3). For Task 2 only "a."
+// is produced — the DSP strips the prefix at the dispatch entry. Globals
+// (bpm, running, sync_source, etc.) stay bare.
+function slotKey(k) { return (ui.activeSlot === 0 ? "a." : "b.") + k; }
+
 function setDspParam(key, val) {
     if (typeof host_module_set_param === "function") {
         host_module_set_param(key, String(val));
@@ -155,19 +161,19 @@ function parsePattern(s) {
 }
 
 function pollDsp() {
-    const pos = getDspParam("position");
+    const pos = getDspParam(slotKey("position"));
     if (pos !== null && pos !== "") cur().position = parseInt(pos, 10) | 0;
     if ((pollTick % 10) === 0) {
-        parsePattern(getDspParam("pattern"));
-        const bank = getDspParam("current_bank");
+        parsePattern(getDspParam(slotKey("pattern")));
+        const bank = getDspParam(slotKey("current_bank"));
         if (bank !== null && bank !== "") cur().currentBank = parseInt(bank, 10) | 0;
-        const pending = getDspParam("pending_recall");
+        const pending = getDspParam(slotKey("pending_recall"));
         if (pending !== null && pending !== "") cur().pendingRecall = parseInt(pending, 10) | 0;
         const running = getDspParam("running");
         if (running !== null && running !== "") ui.running = parseInt(running, 10) | 0;
     }
     if ((pollTick % 30) === 0) {
-        const bf = getDspParam("bank_filled");
+        const bf = getDspParam(slotKey("bank_filled"));
         if (bf && typeof bf === "string") {
             const slot = cur();
             for (let i = 0; i < slot.bankFilled.length; i++) {
@@ -233,7 +239,7 @@ function adjustFloat(key, uiKey, delta, step, lo, hi) {
     const next = clamp(slot[uiKey] + delta * step, lo, hi);
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
-        setDspParam(key, next.toFixed(3));
+        setDspParam(slotKey(key), next.toFixed(3));
     }
 }
 
@@ -265,7 +271,7 @@ function adjustInt(key, uiKey, delta, lo, hi) {
     const next = clamp((slot[uiKey] | 0) + steps, lo, hi);
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
-        setDspParam(key, String(next));
+        setDspParam(slotKey(key), String(next));
     }
 }
 
@@ -276,7 +282,7 @@ function adjustEnum(key, uiKey, delta, count) {
     const next = ((slot[uiKey] | 0) + steps + count * 100) % count;
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
-        setDspParam(key, String(next));
+        setDspParam(slotKey(key), String(next));
     }
 }
 
@@ -289,7 +295,7 @@ function adjustLength(delta) {
     const next = LENGTHS[clamp(curIdx + steps, 0, LENGTHS.length - 1)];
     if (next !== slot.length) {
         slot.length = next;
-        setDspParam("length", String(next));
+        setDspParam(slotKey("length"), String(next));
     }
 }
 
@@ -303,24 +309,24 @@ function scalePageItems() {
     return [
         createEnum("K5: Root", {
             get: () => cur().root,
-            set: (v) => { cur().root = v; setDspParam("root", String(v)); },
+            set: (v) => { cur().root = v; setDspParam(slotKey("root"), String(v)); },
             options: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             format: (v) => ROOT_NAMES[v] || "?"
         }),
         createEnum("K6: Scale", {
             get: () => cur().scale,
-            set: (v) => { cur().scale = v; setDspParam("scale", String(v)); },
+            set: (v) => { cur().scale = v; setDspParam(slotKey("scale"), String(v)); },
             options: SCALE_NAMES.map((_, i) => i),
             format: (v) => SCALE_NAMES[v] || "?"
         }),
         createEnum("K7: Length", {
             get: () => cur().length,
-            set: (v) => { cur().length = v; setDspParam("length", String(v)); },
+            set: (v) => { cur().length = v; setDspParam(slotKey("length"), String(v)); },
             options: LENGTHS
         }),
         createValue("K8: Gate", {
             get: () => Math.round(cur().gate * 100),
-            set: (v) => { cur().gate = v / 100; setDspParam("gate", (v / 100).toFixed(3)); },
+            set: (v) => { cur().gate = v / 100; setDspParam(slotKey("gate"), (v / 100).toFixed(3)); },
             min: 10, max: 100,
             format: (v) => v + "%"
         })
@@ -332,22 +338,22 @@ function mutationPageItems() {
     return [
         createValue("K1: Density", {
             get: () => Math.round(cur().density * 100),
-            set: (v) => { cur().density = v / 100; setDspParam("density", (v / 100).toFixed(3)); setStale(); },
+            set: (v) => { cur().density = v / 100; setDspParam(slotKey("density"), (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
         createValue("K2: Accent", {
             get: () => Math.round(cur().accent * 100),
-            set: (v) => { cur().accent = v / 100; setDspParam("accent", (v / 100).toFixed(3)); setStale(); },
+            set: (v) => { cur().accent = v / 100; setDspParam(slotKey("accent"), (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
         createValue("K3: Slide", {
             get: () => Math.round(cur().slide * 100),
-            set: (v) => { cur().slide = v / 100; setDspParam("slide", (v / 100).toFixed(3)); setStale(); },
+            set: (v) => { cur().slide = v / 100; setDspParam(slotKey("slide"), (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
         createValue("K4: Octaves", {
             get: () => cur().octaves,
-            set: (v) => { cur().octaves = v; setDspParam("octaves", String(v)); setStale(); },
+            set: (v) => { cur().octaves = v; setDspParam(slotKey("octaves"), String(v)); setStale(); },
             min: 1, max: 3
         })
     ];
@@ -357,7 +363,7 @@ function channelPageItems() {
     return [
         createValue("MIDI Ch", {
             get: () => cur().channel,
-            set: (v) => { cur().channel = v; setDspParam("channel", String(v)); },
+            set: (v) => { cur().channel = v; setDspParam(slotKey("channel"), String(v)); },
             min: 1, max: 16
         })
     ];
@@ -525,7 +531,7 @@ function cycleStepState(stepIdx) {
     const prev = slot.steps[stepIdx] | 0;
     const next = (prev + 1) & 3;  // rest → note → accent → slide → rest
     slot.steps[stepIdx] = next;
-    setDspParam("set_step", stepIdx + ":" + next);
+    setDspParam(slotKey("set_step"), stepIdx + ":" + next);
 }
 
 function handlePadNoteOn(note, vel) {
@@ -543,18 +549,18 @@ function handlePadNoteOn(note, vel) {
     } else if (row === 1) {              // banks (Shift = store, plain = recall-at-next-bar)
         const bn = col + 1;
         if (shiftHeld) {
-            setDspParam("store_bank", String(col));
+            setDspParam(slotKey("store_bank"), String(col));
             slot.currentBank = col;
             showOverlay("Bank " + bn, "saved");
         } else {
             if (ui.running) {
                 /* Queue the recall; DSP applies at next bar boundary. */
-                setDspParam("recall_bank", String(col));
+                setDspParam(slotKey("recall_bank"), String(col));
                 slot.pendingRecall = col;
                 showOverlay("Bank " + bn, "queued");
             } else {
                 /* Transport stopped — no bar boundary coming, apply now. */
-                setDspParam("recall_bank_now", String(col));
+                setDspParam(slotKey("recall_bank_now"), String(col));
                 slot.currentBank = col;
                 slot.pendingRecall = -1;
                 showOverlay("Bank " + bn, "recalled");
@@ -563,17 +569,17 @@ function handlePadNoteOn(note, vel) {
     } else {                             // row 0: actions
         switch (col) {
             case 0:
-                setDspParam("generate", "0");
+                setDspParam(slotKey("generate"), "0");
                 patternStale = false;
                 showOverlay("Pattern", "regenerated");
                 break;
             case 1:
-                setDspParam("mutate", "1");
+                setDspParam(slotKey("mutate"), "1");
                 showOverlay("Pattern", "mutated");
                 break;
             case 2:
                 slot.direction = (slot.direction + 1) & 3;
-                setDspParam("direction", String(slot.direction));
+                setDspParam(slotKey("direction"), String(slot.direction));
                 showOverlay("Direction", DIRECTIONS[slot.direction] || "?");
                 break;
             case 3:
@@ -945,7 +951,7 @@ globalThis.onMidiMessageInternal = function(data) {
     // on the hardware button doesn't wipe a pattern. Plain X nudges the user.
     if (type === 0xB0 && d1 === CC_DELETE && d2 > 0) {
         if (shiftHeld) {
-            setDspParam("clear", "1");
+            setDspParam(slotKey("clear"), "1");
             showOverlay("Pattern", "cleared");
         } else {
             showOverlay("Clear", "Shift+X to confirm");
@@ -955,7 +961,7 @@ globalThis.onMidiMessageInternal = function(data) {
 
     // Undo button — restore the pattern before the last NEW / MUTATE / CLEAR.
     if (type === 0xB0 && d1 === CC_UNDO && d2 > 0) {
-        setDspParam("undo", "1");
+        setDspParam(slotKey("undo"), "1");
         showOverlay("Undo", "last pattern op");
         return;
     }
@@ -964,14 +970,14 @@ globalThis.onMidiMessageInternal = function(data) {
     if (type === 0xB0 && d1 === CC_DOWN && d2 > 0) {
         const slot = cur();
         slot.transpose = Math.max(-48, (slot.transpose | 0) - 12);
-        setDspParam("transpose", String(slot.transpose));
+        setDspParam(slotKey("transpose"), String(slot.transpose));
         showOverlay("Transpose", (slot.transpose / 12) + " oct");
         return;
     }
     if (type === 0xB0 && d1 === CC_UP && d2 > 0) {
         const slot = cur();
         slot.transpose = Math.min( 48, (slot.transpose | 0) + 12);
-        setDspParam("transpose", String(slot.transpose));
+        setDspParam(slotKey("transpose"), String(slot.transpose));
         showOverlay("Transpose", (slot.transpose / 12) + " oct");
         return;
     }
