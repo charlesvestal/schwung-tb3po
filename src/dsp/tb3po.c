@@ -668,9 +668,29 @@ static float parse_float(const char *s, float fallback) {
     return (float)strtod(s, NULL);
 }
 
+/* Strip an optional per-slot prefix (e.g. "a.density" -> "density") and
+ * report which slot was addressed. Task 2 only produces "a." prefixes —
+ * "b." is reserved for Task 3 when slot B lands. Unprefixed keys are
+ * treated as slot 0 for back-compat with global params whose dispatch
+ * doesn't care about the slot index anyway. */
+static const char *strip_slot_prefix(const char *key, int *slot_out) {
+    if (key && key[0] == 'a' && key[1] == '.') {
+        if (slot_out) *slot_out = 0;
+        return key + 2;
+    }
+    /* 'b.' prefix reserved for Task 3. */
+    if (slot_out) *slot_out = 0;
+    return key;
+}
+
 static void tb3po_set_param(void *inst, const char *key, const char *val) {
     tb3po_inst_t *t = (tb3po_inst_t *)inst;
     if (!t || !key) return;
+    /* TODO(Task 3): thread slot_idx through to a per-slot state struct once
+     * slot B exists. For Task 2 we only have one slot so the index is unused. */
+    int slot_idx = 0;
+    key = strip_slot_prefix(key, &slot_idx);
+    (void)slot_idx;
     if (strcmp(key, "density") == 0)      t->density = parse_float(val, 0.7f);
     else if (strcmp(key, "accent") == 0)  t->accent = parse_float(val, 0.4f);
     else if (strcmp(key, "slide") == 0)   t->slide = parse_float(val, 0.25f);
@@ -757,6 +777,11 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
 static int tb3po_get_param(void *inst, const char *key, char *buf, int buf_len) {
     tb3po_inst_t *t = (tb3po_inst_t *)inst;
     if (!t || !key || !buf || buf_len < 2) return -1;
+    /* TODO(Task 3): thread slot_idx through to a per-slot state struct once
+     * slot B exists. For Task 2 we only have one slot so the index is unused. */
+    int slot_idx = 0;
+    key = strip_slot_prefix(key, &slot_idx);
+    (void)slot_idx;
     int n = 0;
     if (strcmp(key, "position") == 0)        n = snprintf(buf, buf_len, "%d", t->ui_current_step);
     else if (strcmp(key, "length") == 0)     n = snprintf(buf, buf_len, "%d", t->length);
