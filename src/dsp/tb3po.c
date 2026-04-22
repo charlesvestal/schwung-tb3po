@@ -25,7 +25,7 @@
 #define TB3PO_STATE_DIR  "/data/UserData/schwung/tool_state"
 #define TB3PO_STATE_PATH TB3PO_STATE_DIR "/tb3po.bin"
 #define TB3PO_STATE_MAGIC 0x50334254u   /* "TB3P" little-endian */
-#define TB3PO_STATE_VERSION 1u
+#define TB3PO_STATE_VERSION 2u
 
 typedef enum { STEP_REST = 0, STEP_NOTE = 1, STEP_ACCENT = 2, STEP_SLIDE = 3 } step_kind_t;
 
@@ -412,9 +412,17 @@ static void advance_all_slots(tb3po_inst_t *t) {
  * transport follow state, running flag (always re-derived from the host
  * clock on load), position, pending_recall, undo buffer.
  *
- * TODO(Task 6): bump to version 2 and serialize both slots. For Task 3
- * we only save slots[0] (effectively the v1 format) so Task 3 doesn't
- * drop existing saves; slot 1 stays at in-memory defaults across restarts.
+ * Format history:
+ *   v1: magic, ver=1, <slot_blob>         (single slot, with bpm interleaved)
+ *   v2: magic, ver=2, active_slot:u8, <slot_blob>, <slot_blob>
+ *
+ * The slot_blob layout is deliberately byte-identical between v1 and v2 so
+ * that v1 migration is a direct read into slots[0]. bpm is conceptually a
+ * top-level global but sits physically inside the blob (it was interleaved
+ * in v1 and we didn't want to fork the layout just to move it). Both slot
+ * blobs in v2 carry the same bpm on write; on read we take slot[0]'s value
+ * and ignore slot[1]'s. active_slot is a u8 flanked by no padding; bpm
+ * stays at its historical position inside the blob.
  */
 static int ensure_state_dir(void) {
     struct stat st;
@@ -424,20 +432,10 @@ static int ensure_state_dir(void) {
     return (stat(TB3PO_STATE_DIR, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
-static int tb3po_save_state_locked(const tb3po_inst_t *t) {
-    if (!t) return 0;
-    if (!ensure_state_dir()) return 0;
-    FILE *f = fopen(TB3PO_STATE_PATH, "wb");
-    if (!f) return 0;
-
-    uint32_t magic = TB3PO_STATE_MAGIC;
-    uint32_t ver = TB3PO_STATE_VERSION;
-    fwrite(&magic, sizeof(magic), 1, f);
-    fwrite(&ver,   sizeof(ver),   1, f);
-
-    /* Scalars — match tb3po_load_state() exactly. Task 3 persists slot 0
-     * only; slot 1 comes along in Task 6. */
-    const tb3po_slot_t *s = &t->slots[0];
+/* Writes one slot blob. Layout matches v1's payload exactly (including the
+ * interleaved bpm field). Caller passes bpm explicitly so both slots write
+ * the same shared value in v2. */
+static void write_slot_blob(FILE *f, const tb3po_slot_t *s, float bpm) {
     int32_t i32;
     float   fval;
     uint32_t u32;
@@ -450,7 +448,7 @@ static int tb3po_save_state_locked(const tb3po_inst_t *t) {
     i32 = (int32_t)s->octave_range;   fwrite(&i32, sizeof(i32), 1, f);
     i32 = (int32_t)s->root;           fwrite(&i32, sizeof(i32), 1, f);
     i32 = (int32_t)s->scale;          fwrite(&i32, sizeof(i32), 1, f);
-    fval = t->bpm;                    fwrite(&fval, sizeof(fval), 1, f);
+    fval = bpm;                       fwrite(&fval, sizeof(fval), 1, f);
     fval = s->gate;                   fwrite(&fval, sizeof(fval), 1, f);
     i32 = (int32_t)s->channel;        fwrite(&i32, sizeof(i32), 1, f);
     i32 = (int32_t)s->transpose;      fwrite(&i32, sizeof(i32), 1, f);
@@ -469,6 +467,88 @@ static int tb3po_save_state_locked(const tb3po_inst_t *t) {
         fwrite(s->bank_octaves[b], 1, MAX_STEPS, f);
     }
     fwrite(s->bank_filled, 1, NUM_BANKS, f);
+}
+
+/* Reads one slot blob. bpm_out receives the blob's bpm field (the caller
+ * decides whether to use it or ignore it). Returns 1 on success, 0 on short
+ * read. On failure the slot contents are partially written and must be
+ * discarded by the caller. */
+static int read_slot_blob(FILE *f, tb3po_slot_t *s, float *bpm_out) {
+    int32_t i32;
+    float   fval;
+    uint32_t u32;
+
+#define RD(buf, sz) do { if (fread((buf), (sz), 1, f) != 1) return 0; } while (0)
+
+    RD(&i32, sizeof(i32));   s->length       = i32;
+    RD(&i32, sizeof(i32));   s->direction    = i32;
+    RD(&fval, sizeof(fval)); s->density      = fval;
+    RD(&fval, sizeof(fval)); s->accent       = fval;
+    RD(&fval, sizeof(fval)); s->slide        = fval;
+    RD(&i32, sizeof(i32));   s->octave_range = i32;
+    RD(&i32, sizeof(i32));   s->root         = i32;
+    RD(&i32, sizeof(i32));   s->scale        = i32;
+    RD(&fval, sizeof(fval)); if (bpm_out) *bpm_out = fval;
+    RD(&fval, sizeof(fval)); s->gate         = fval;
+    RD(&i32, sizeof(i32));   s->channel      = i32;
+    RD(&i32, sizeof(i32));   s->transpose    = i32;
+    RD(&u32, sizeof(u32));   s->seed         = u32;
+    RD(&i32, sizeof(i32));   s->current_bank = i32;
+
+    RD(s->steps,   MAX_STEPS);
+    RD(s->degrees, MAX_STEPS);
+    RD(s->octaves, MAX_STEPS);
+
+    for (int b = 0; b < NUM_BANKS; b++) {
+        RD(s->bank_steps[b],   MAX_STEPS);
+        RD(s->bank_degrees[b], MAX_STEPS);
+        RD(s->bank_octaves[b], MAX_STEPS);
+    }
+    RD(s->bank_filled, NUM_BANKS);
+
+#undef RD
+    return 1;
+}
+
+/* Clamp a freshly-loaded slot's scalars back into valid ranges. A corrupt
+ * file must not be able to index past an enum table etc. */
+static void clamp_slot_ranges(tb3po_slot_t *s) {
+    if (s->length < 1 || s->length > MAX_STEPS) s->length = 16;
+    if (s->direction < 0 || s->direction > 3) s->direction = 0;
+    if (s->octave_range < 1 || s->octave_range > 3) s->octave_range = 2;
+    if (s->root < 0 || s->root > 11) s->root = 9;
+    if (s->scale < 0 || s->scale >= NUM_SCALES) s->scale = 0;
+    if (s->channel < 1 || s->channel > 16) s->channel = 1;
+    if (s->current_bank < 0 || s->current_bank >= NUM_BANKS) s->current_bank = 0;
+    if (s->density < 0.0f) s->density = 0.0f;
+    if (s->density > 1.0f) s->density = 1.0f;
+    if (s->accent  < 0.0f) s->accent  = 0.0f;
+    if (s->accent  > 1.0f) s->accent  = 1.0f;
+    if (s->slide   < 0.0f) s->slide   = 0.0f;
+    if (s->slide   > 1.0f) s->slide   = 1.0f;
+    if (s->gate < 0.1f || s->gate > 1.0f) s->gate = 0.5f;
+}
+
+static int tb3po_save_state_locked(const tb3po_inst_t *t) {
+    if (!t) return 0;
+    if (!ensure_state_dir()) return 0;
+    FILE *f = fopen(TB3PO_STATE_PATH, "wb");
+    if (!f) return 0;
+
+    uint32_t magic = TB3PO_STATE_MAGIC;
+    uint32_t ver = TB3PO_STATE_VERSION;
+    fwrite(&magic, sizeof(magic), 1, f);
+    fwrite(&ver,   sizeof(ver),   1, f);
+
+    /* v2 top-level: active_slot (u8). bpm lives inside each slot blob for
+     * layout continuity with v1 — see the header comment above. */
+    uint8_t active = (uint8_t)(t->active_slot & 0x01);
+    fwrite(&active, sizeof(active), 1, f);
+
+    /* Slot blobs, byte-identical to v1 payload. */
+    for (int i = 0; i < NUM_SLOTS; i++) {
+        write_slot_blob(f, &t->slots[i], t->bpm);
+    }
 
     fclose(f);
     return 1;
@@ -505,6 +585,12 @@ static void *tb3po_state_worker(void *arg) {
     return NULL;
 }
 
+/* Returns:
+ *   2 = v2 file loaded (both slots populated from disk)
+ *   1 = v1 file loaded (slots[0] from disk, slots[1] left untouched for the
+ *       caller to cold-start with defaults + channel=2 + fresh pattern)
+ *   0 = no file, bad magic, unknown version, or truncated/corrupt payload
+ */
 static int tb3po_load_state(tb3po_inst_t *t) {
     if (!t) return 0;
     FILE *f = fopen(TB3PO_STATE_PATH, "rb");
@@ -514,69 +600,46 @@ static int tb3po_load_state(tb3po_inst_t *t) {
     if (fread(&magic, sizeof(magic), 1, f) != 1 || magic != TB3PO_STATE_MAGIC) {
         fclose(f); return 0;
     }
-    if (fread(&ver, sizeof(ver), 1, f) != 1 || ver != TB3PO_STATE_VERSION) {
+    if (fread(&ver, sizeof(ver), 1, f) != 1) {
         fclose(f); return 0;
     }
 
-    /* Task 3 loads into slot 0 only — matches the v1 writer. */
-    tb3po_slot_t *s = &t->slots[0];
-    int32_t i32;
-    float   fval;
-    uint32_t u32;
-    int ok = 1;
+    int result = 0;
+    if (ver == 1u) {
+        /* v1: single slot blob directly after the header. Migrate into
+         * slots[0]; slots[1] is the caller's responsibility. */
+        float bpm = 120.0f;
+        if (!read_slot_blob(f, &t->slots[0], &bpm)) { fclose(f); return 0; }
+        clamp_slot_ranges(&t->slots[0]);
+        if (bpm < 20.0f || bpm > 400.0f) bpm = 120.0f;
+        t->bpm = bpm;
+        t->active_slot = 0;
+        result = 1;
+    } else if (ver == 2u) {
+        /* v2: active_slot:u8, then slot[0] blob, then slot[1] blob. */
+        uint8_t active = 0;
+        if (fread(&active, sizeof(active), 1, f) != 1) { fclose(f); return 0; }
 
-#define RD(buf, sz) do { if (fread((buf), (sz), 1, f) != 1) { ok = 0; goto done; } } while (0)
+        float bpm0 = 120.0f, bpm1 = 120.0f;
+        if (!read_slot_blob(f, &t->slots[0], &bpm0)) { fclose(f); return 0; }
+        if (!read_slot_blob(f, &t->slots[1], &bpm1)) { fclose(f); return 0; }
+        clamp_slot_ranges(&t->slots[0]);
+        clamp_slot_ranges(&t->slots[1]);
 
-    RD(&i32, sizeof(i32));   s->length       = i32;
-    RD(&i32, sizeof(i32));   s->direction    = i32;
-    RD(&fval, sizeof(fval)); s->density      = fval;
-    RD(&fval, sizeof(fval)); s->accent       = fval;
-    RD(&fval, sizeof(fval)); s->slide        = fval;
-    RD(&i32, sizeof(i32));   s->octave_range = i32;
-    RD(&i32, sizeof(i32));   s->root         = i32;
-    RD(&i32, sizeof(i32));   s->scale        = i32;
-    RD(&fval, sizeof(fval)); t->bpm          = fval;
-    RD(&fval, sizeof(fval)); s->gate         = fval;
-    RD(&i32, sizeof(i32));   s->channel      = i32;
-    RD(&i32, sizeof(i32));   s->transpose    = i32;
-    RD(&u32, sizeof(u32));   s->seed         = u32;
-    RD(&i32, sizeof(i32));   s->current_bank = i32;
-
-    RD(s->steps,   MAX_STEPS);
-    RD(s->degrees, MAX_STEPS);
-    RD(s->octaves, MAX_STEPS);
-
-    for (int b = 0; b < NUM_BANKS; b++) {
-        RD(s->bank_steps[b],   MAX_STEPS);
-        RD(s->bank_degrees[b], MAX_STEPS);
-        RD(s->bank_octaves[b], MAX_STEPS);
+        /* slot[0]'s bpm is authoritative — both slots write the same value
+         * but we only need to trust one on read. */
+        if (bpm0 < 20.0f || bpm0 > 400.0f) bpm0 = 120.0f;
+        t->bpm = bpm0;
+        t->active_slot = (active >= NUM_SLOTS) ? 0 : (int)active;
+        result = 2;
+    } else {
+        /* Unknown version — fall back to cold-start. */
+        fclose(f);
+        return 0;
     }
-    RD(s->bank_filled, NUM_BANKS);
 
-#undef RD
-
-done:
     fclose(f);
-    if (!ok) return 0;
-
-    /* Clamp recovered scalars to known-safe ranges — a corrupt file
-     * shouldn't be able to index past the end of an enum table etc. */
-    if (s->length < 1 || s->length > MAX_STEPS) s->length = 16;
-    if (s->direction < 0 || s->direction > 3) s->direction = 0;
-    if (s->octave_range < 1 || s->octave_range > 3) s->octave_range = 2;
-    if (s->root < 0 || s->root > 11) s->root = 9;
-    if (s->scale < 0 || s->scale >= NUM_SCALES) s->scale = 0;
-    if (s->channel < 1 || s->channel > 16) s->channel = 1;
-    if (s->current_bank < 0 || s->current_bank >= NUM_BANKS) s->current_bank = 0;
-    if (s->density < 0.0f) s->density = 0.0f;
-    if (s->density > 1.0f) s->density = 1.0f;
-    if (s->accent  < 0.0f) s->accent  = 0.0f;
-    if (s->accent  > 1.0f) s->accent  = 1.0f;
-    if (s->slide   < 0.0f) s->slide   = 0.0f;
-    if (s->slide   > 1.0f) s->slide   = 1.0f;
-    if (t->bpm < 20.0f || t->bpm > 400.0f) t->bpm = 120.0f;
-    if (s->gate < 0.1f || s->gate > 1.0f) s->gate = 0.5f;
-    return 1;
+    return result;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -612,20 +675,27 @@ static void *tb3po_create(const char *module_dir, const char *json_defaults) {
 
     /* Restore persisted state before generating a pattern — if we load a
      * pattern from disk we don't want to overwrite it with a fresh random one.
-     * (Task 6: v2 format will load both slots; for now only slot 0 loads.) */
+     *   loaded == 2: v2 file, both slots came from disk.
+     *   loaded == 1: v1 file, slot 0 came from disk, slot 1 needs a cold
+     *                pattern (slot_init_defaults already set channel=2 above).
+     *                The next save will upgrade the file to v2 transparently.
+     *   loaded == 0: fresh install — cold-generate both. */
     int loaded = tb3po_load_state(t);
 
     recompute_step_length(t);
-    if (!loaded) {
-        /* No saved state — seed each slot's default pattern so there's
-         * something to hear as soon as the user switches to it. */
+    if (loaded == 0) {
         for (int i = 0; i < NUM_SLOTS; i++) {
             generate_pattern(&t->slots[i], t->slots[i].seed);
         }
-    } else {
-        /* Slot 1 always cold-starts until Task 6 persists it. */
+    } else if (loaded == 1) {
+        /* v1 migration: slot 1 defaults were wiped to zero by slot_init_defaults
+         * and overridden to channel=2 above, but the load left slot 1 untouched.
+         * Re-apply defaults + channel=2 + a fresh pattern so slot B is playable. */
+        slot_init_defaults(&t->slots[1]);
+        t->slots[1].channel = 2;
         generate_pattern(&t->slots[1], t->slots[1].seed);
     }
+    /* v2 (loaded == 2): both slots' patterns came from disk, nothing to do. */
     for (int i = 0; i < NUM_SLOTS; i++) {
         t->slots[i].position = t->slots[i].length - 1;  /* reset regardless */
     }
