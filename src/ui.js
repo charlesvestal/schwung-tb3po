@@ -372,17 +372,17 @@ function currentPageItems() {
 
 function adjustMenuItem(item, delta) {
     if (!item || delta === 0 || !item.set || !item.get) return;
-    const cur = item.get();
+    const curVal = item.get();
     if (item.type === "value") {
-        const next = clamp(cur + delta, item.min, item.max);
-        if (next !== cur) item.set(next);
+        const next = clamp(curVal + delta, item.min, item.max);
+        if (next !== curVal) item.set(next);
     } else if (item.type === "enum") {
         const opts = item.options || [];
         if (opts.length === 0) return;
-        const idx = opts.indexOf(cur);
+        const idx = opts.indexOf(curVal);
         const newIdx = ((idx < 0 ? 0 : idx) + delta + opts.length * 100) % opts.length;
         const next = opts[newIdx];
-        if (next !== cur) item.set(next);
+        if (next !== curVal) item.set(next);
     }
 }
 
