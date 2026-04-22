@@ -369,10 +369,9 @@ static int next_position(tb3po_slot_t *s) {
     }
 }
 
-/* Advance one slot by one step. emit_midi controls whether note on/off goes
- * out for this slot — Task 3 gates slot 1's emission to keep the second slot
- * silent until Task 4 turns on parallel playback. */
-static void advance_step(tb3po_inst_t *t, tb3po_slot_t *s, int emit_midi) {
+/* Advance one slot by one step. Each slot emits note on/off on its own
+ * channel; slots with the same channel will collide by design. */
+static void advance_step(tb3po_inst_t *t, tb3po_slot_t *s) {
     int prev = s->position;
     int n = next_position(s);
     /* At bar boundaries (position wraps to 0 on a forward pass), honour a
@@ -390,19 +389,14 @@ static void advance_step(tb3po_inst_t *t, tb3po_slot_t *s, int emit_midi) {
     }
     s->position = n;
     s->ui_current_step = n;
-    if (emit_midi) {
-        emit_step(t, s, prev, n);
-    }
-    /* TODO(Task 4): enable slot 1 MIDI emission by passing emit_midi=true
-     * for both slots in advance_all_slots() below. */
+    emit_step(t, s, prev, n);
 }
 
-/* Advance every slot one step on a single clock tick. Slot 0 emits MIDI;
- * slot 1 advances silently for now. */
+/* Advance every slot one step on a single clock tick. Both slots emit MIDI
+ * on their own channel in parallel. */
 static void advance_all_slots(tb3po_inst_t *t) {
     for (int i = 0; i < NUM_SLOTS; i++) {
-        int emit = (i == 0);
-        advance_step(t, &t->slots[i], emit);
+        advance_step(t, &t->slots[i]);
     }
 }
 
