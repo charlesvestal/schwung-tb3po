@@ -40,6 +40,8 @@ const CC_RIGHT = 63;            // Move's Right button (step page +)
 const CC_UNDO = 56;             // Move's Undo button
 const CC_TRACK1 = 43;           // Track 1 button (reversed: CC43=T1, CC40=T4)
 const CC_TRACK2 = 42;
+const CC_TRACK3 = 41;
+const CC_TRACK4 = 40;
 
 // Control modes — determines what the 8 knobs do.
 const MODE_3PO = 0;             // Sequencer params (density/accent/slide/...)
@@ -111,7 +113,7 @@ function makeSlot(defaults) {
 
 let ui = {
     activeSlot: 0,
-    slots: [makeSlot()],
+    slots: [makeSlot(), makeSlot({channel: 2})],
     bpm: 120,
     running: 1,
     syncSource: "INT"
@@ -523,6 +525,26 @@ function send303Cc(knobIdx, delta) {
     }
 }
 
+// Track buttons T1-T4 select (slot, mode). Force a fresh 303-slot scan on
+// 303-mode entries so a just-loaded 303 is picked up without waiting for
+// the periodic poll; bail with a nudge if there's nothing to control.
+function selectSlotMode(slotIdx, mode) {
+    if (mode === MODE_303) {
+        cc303SlotIdx = find303Slot();
+        has303Slot = cc303SlotIdx >= 0;
+        if (!has303Slot) {
+            showOverlay("No 303 loaded", "route a 303 to Ch" + ui.slots[slotIdx].channel);
+            return;
+        }
+    }
+    ui.activeSlot = slotIdx;
+    ui.slots[slotIdx].mode = mode;
+    setDspParam("active_slot", String(slotIdx));
+    if (mode === MODE_303) sync303FromPlugin();
+    showOverlay("Slot " + (slotIdx === 0 ? "A" : "B"),
+                mode === MODE_3PO ? "3PO" : "303 CCs");
+}
+
 // -------- Pad handling ----------
 
 function cycleStepState(stepIdx) {
@@ -632,6 +654,15 @@ function setTrackLed(cc, color) {
     sharedSetButtonLED(cc, color & 0x7F, ledForceNextRefresh);
 }
 
+// Colour a track button for (slot, mode): bright when it's the active
+// slot+mode, dim when not, off for 303 buttons without a 303 loaded.
+function trackLed(slotIdx, mode) {
+    const active = (ui.activeSlot === slotIdx && ui.slots[slotIdx].mode === mode);
+    if (mode === MODE_303 && !has303Slot) return LED_OFF;
+    if (!active) return LED_DARK_GREY;
+    return mode === MODE_3PO ? LED_TEAL : LED_ORANGE;
+}
+
 function refreshLeds() {
     clampStepView();
     // Force a full repaint every ~2 sec unconditionally. Tick fires during
@@ -707,14 +738,12 @@ function refreshLeds() {
         }
     }
 
-    // Track buttons 1..2 — knob mode indicator. Track 2 only lights when a
-    // 303 is actually loaded somewhere tb3po can reach.
-    setTrackLed(CC_TRACK1, slot.mode === MODE_3PO ? LED_TEAL : LED_DARK_GREY);
-    if (has303Slot) {
-        setTrackLed(CC_TRACK2, slot.mode === MODE_303 ? LED_ORANGE : LED_DARK_GREY);
-    } else {
-        setTrackLed(CC_TRACK2, LED_OFF);
-    }
+    // Track buttons 1..4 — slot/mode selector. One is bright (active
+    // slot+mode), the others dim. T2/T4 stay dark when no 303 is reachable.
+    setTrackLed(CC_TRACK1, trackLed(0, MODE_3PO));
+    setTrackLed(CC_TRACK2, trackLed(0, MODE_303));
+    setTrackLed(CC_TRACK3, trackLed(1, MODE_3PO));
+    setTrackLed(CC_TRACK4, trackLed(1, MODE_303));
 
     // Hardware buttons tb3po owns. Play is intentionally NOT set here —
     // we want Move firmware to drive it (passthrough capability).
@@ -903,11 +932,9 @@ function draw() {
 
 globalThis.init = function() {
     console.log("[tb3po] ui init");
-    // First-load nudge — tb3po emits MIDI on its configured channel but
-    // doesn't itself produce audio. Without a shadow slot listening on that
-    // channel, nothing is heard. Show this once on load so the user knows
-    // where to point a synth.
-    showOverlay("MIDI -> Ch " + cur().channel, "route a synth", 360);
+    // First-load nudge — call out the four-button slot/mode scheme so the
+    // user understands two slots (A/B) run in parallel on separate channels.
+    showOverlay("Slots A+B", "T1/T2 A, T3/T4 B", 360);
 };
 
 globalThis.tick = function() {
@@ -1000,25 +1027,14 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    // Track 1 / Track 2 buttons switch knob mode.
-    if (type === 0xB0 && d1 === CC_TRACK1 && d2 > 0) {
-        cur().mode = MODE_3PO;
-        showOverlay("Knob mode", "3PO");
-        return;
-    }
-    if (type === 0xB0 && d1 === CC_TRACK2 && d2 > 0) {
-        // Force a fresh slot scan on every Track 2 press so a just-loaded
-        // 303 is picked up without waiting for the periodic poll.
-        cc303SlotIdx = find303Slot();
-        has303Slot = cc303SlotIdx >= 0;
-        if (!has303Slot) {
-            showOverlay("No 303 loaded", "route a 303 to Ch" + cur().channel);
-            return;
-        }
-        cur().mode = MODE_303;
-        sync303FromPlugin();
-        showOverlay("Knob mode", "303 CCs");
-        return;
+    // Track 1-4 buttons select (slot, mode). T1/T2 = slot A 3PO/303,
+    // T3/T4 = slot B 3PO/303. active_slot is a global DSP param (no a./b.
+    // prefix) so the DSP knows which channel the 303-Control CC path rides.
+    if (type === 0xB0 && d2 > 0) {
+        if      (d1 === CC_TRACK1) { selectSlotMode(0, MODE_3PO); return; }
+        else if (d1 === CC_TRACK2) { selectSlotMode(0, MODE_303); return; }
+        else if (d1 === CC_TRACK3) { selectSlotMode(1, MODE_3PO); return; }
+        else if (d1 === CC_TRACK4) { selectSlotMode(1, MODE_303); return; }
     }
 
     // Knob deltas arrive as synthetic CC messages (CC 71-78).
