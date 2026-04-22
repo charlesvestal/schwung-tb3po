@@ -60,7 +60,7 @@ const NUM_PAGES = 5;
 const PAGE_NAMES_3PO = ["PERFORM", "MUTATION", "SCALE", "CHANNEL", "HELP"];
 const PAGE_NAMES_303 = ["PERFORM", "303 Control 1", "303 Control 2", "CHANNEL", "HELP"];
 function pageName(idx) {
-    return (controlMode === MODE_303 ? PAGE_NAMES_303 : PAGE_NAMES_3PO)[idx] || "?";
+    return (cur().mode === MODE_303 ? PAGE_NAMES_303 : PAGE_NAMES_3PO)[idx] || "?";
 }
 
 // LED palette — values are Move's note velocities (see shared/constants.mjs).
@@ -78,49 +78,53 @@ const LED_PURPLE    = 107;
 const LED_PINK      = 25;
 
 // Local cached state (display only — DSP is source of truth).
+// Per-slot state lives inside slots[i]; globals (bpm/running/syncSource)
+// stay at the top level. A single slot for now — slot B comes in Task 3.
+function makeSlot(defaults) {
+    return Object.assign({
+        position: 0,
+        length: 16,
+        density: 0.7,
+        accent: 0.4,
+        slide: 0.25,
+        octaves: 2,
+        root: 9,
+        scale: 0,
+        gate: 0.5,
+        channel: 1,
+        direction: 0,
+        currentBank: 0,
+        pendingRecall: -1,
+        bankFilled: new Array(8).fill(false),
+        transpose: 0,
+        steps: new Array(32).fill(STEP_REST),
+        cc303: new Array(8).fill(64),
+        mode: MODE_3PO,
+        stepView: 0,
+        menuState: {
+            [PAGE_MUTATION]: { selectedIndex: 0, editing: false },
+            [PAGE_SCALE]:    { selectedIndex: 0, editing: false },
+            [PAGE_CHANNEL]:  { selectedIndex: 0, editing: false }
+        }
+    }, defaults || {});
+}
+
 let ui = {
-    position: 0,
-    length: 16,
-    density: 0.7,
-    accent: 0.4,
-    slide: 0.25,
-    octaves: 2,
-    root: 9,
-    scale: 0,
+    activeSlot: 0,
+    slots: [makeSlot()],
     bpm: 120,
-    gate: 0.5,
-    channel: 1,
-    direction: 0,
-    currentBank: 0,
-    pendingRecall: -1,
-    bankFilled: new Array(8).fill(false),
-    transpose: 0,
     running: 1,
-    syncSource: "INT",
-    steps: new Array(32).fill(STEP_REST)
+    syncSource: "INT"
 };
+
+function cur() { return ui.slots[ui.activeSlot]; }
 
 let pollTick = 0;
 let shiftHeld = false;
 let currentPage = PAGE_PERFORM;
-let controlMode = MODE_3PO;
-let stepView = 0;   // which 16-step window of the pattern is shown (0 or 1)
 
-// Per-page jog menu state. Each editable page maintains its own selected
-// index and edit flag. Values are applied LIVE while editing (no uncommitted
-// buffer) because most params have immediate audible effect.
-const menuState = {
-    [PAGE_MUTATION]: { selectedIndex: 0, editing: false },
-    [PAGE_SCALE]:    { selectedIndex: 0, editing: false },
-    [PAGE_CHANNEL]:  { selectedIndex: 0, editing: false }
-};
-
-function stepPageCount() { return Math.max(1, Math.ceil(ui.length / 16)); }
-function clampStepView()  { const m = stepPageCount() - 1; if (stepView > m) stepView = m; if (stepView < 0) stepView = 0; }
-
-// Running CC values for 303 mode — one per knob slot. Start at 64 (midpoint)
-// so the first nudge lands in a sane place.
-const cc303Values = new Array(8).fill(64);
+function stepPageCount() { return Math.max(1, Math.ceil(cur().length / 16)); }
+function clampStepView()  { const m = stepPageCount() - 1; if (cur().stepView > m) cur().stepView = m; if (cur().stepView < 0) cur().stepView = 0; }
 
 // -------- DSP bridge ----------
 
@@ -142,30 +146,32 @@ function parsePattern(s) {
     const parts = s.split("|");
     if (parts.length < 2) return;
     const len = parseInt(parts[0], 10);
-    if (isFinite(len) && len > 0) ui.length = len;
+    if (isFinite(len) && len > 0) cur().length = len;
     const stepsCsv = parts[1].split(",");
-    for (let i = 0; i < stepsCsv.length && i < ui.steps.length; i++) {
-        ui.steps[i] = parseInt(stepsCsv[i], 10) | 0;
+    const slot = cur();
+    for (let i = 0; i < stepsCsv.length && i < slot.steps.length; i++) {
+        slot.steps[i] = parseInt(stepsCsv[i], 10) | 0;
     }
 }
 
 function pollDsp() {
     const pos = getDspParam("position");
-    if (pos !== null && pos !== "") ui.position = parseInt(pos, 10) | 0;
+    if (pos !== null && pos !== "") cur().position = parseInt(pos, 10) | 0;
     if ((pollTick % 10) === 0) {
         parsePattern(getDspParam("pattern"));
         const bank = getDspParam("current_bank");
-        if (bank !== null && bank !== "") ui.currentBank = parseInt(bank, 10) | 0;
+        if (bank !== null && bank !== "") cur().currentBank = parseInt(bank, 10) | 0;
         const pending = getDspParam("pending_recall");
-        if (pending !== null && pending !== "") ui.pendingRecall = parseInt(pending, 10) | 0;
+        if (pending !== null && pending !== "") cur().pendingRecall = parseInt(pending, 10) | 0;
         const running = getDspParam("running");
         if (running !== null && running !== "") ui.running = parseInt(running, 10) | 0;
     }
     if ((pollTick % 30) === 0) {
         const bf = getDspParam("bank_filled");
         if (bf && typeof bf === "string") {
-            for (let i = 0; i < ui.bankFilled.length; i++) {
-                ui.bankFilled[i] = (bf[i] === "1");
+            const slot = cur();
+            for (let i = 0; i < slot.bankFilled.length; i++) {
+                slot.bankFilled[i] = (bf[i] === "1");
             }
         }
         const ss = getDspParam("sync_source");
@@ -178,8 +184,8 @@ function pollDsp() {
         cc303SlotIdx = find303Slot();
         const prev = has303Slot;
         has303Slot = cc303SlotIdx >= 0;
-        if (prev && !has303Slot && controlMode === MODE_303) {
-            controlMode = MODE_3PO;
+        if (prev && !has303Slot && cur().mode === MODE_303) {
+            cur().mode = MODE_3PO;
             showOverlay("303 unloaded", "knob mode → 3PO");
         }
     }
@@ -223,9 +229,10 @@ function scaleDelta(raw, gain) {
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 function adjustFloat(key, uiKey, delta, step, lo, hi) {
-    const next = clamp(ui[uiKey] + delta * step, lo, hi);
-    if (next !== ui[uiKey]) {
-        ui[uiKey] = next;
+    const slot = cur();
+    const next = clamp(slot[uiKey] + delta * step, lo, hi);
+    if (next !== slot[uiKey]) {
+        slot[uiKey] = next;
         setDspParam(key, next.toFixed(3));
     }
 }
@@ -254,9 +261,10 @@ function resetDetents(uiKey) {
 function adjustInt(key, uiKey, delta, lo, hi) {
     const steps = consumeDetents(uiKey, delta);
     if (steps === 0) return;
-    const next = clamp((ui[uiKey] | 0) + steps, lo, hi);
-    if (next !== ui[uiKey]) {
-        ui[uiKey] = next;
+    const slot = cur();
+    const next = clamp((slot[uiKey] | 0) + steps, lo, hi);
+    if (next !== slot[uiKey]) {
+        slot[uiKey] = next;
         setDspParam(key, String(next));
     }
 }
@@ -264,9 +272,10 @@ function adjustInt(key, uiKey, delta, lo, hi) {
 function adjustEnum(key, uiKey, delta, count) {
     const steps = consumeDetents(uiKey, delta);
     if (steps === 0) return;
-    const next = ((ui[uiKey] | 0) + steps + count * 100) % count;
-    if (next !== ui[uiKey]) {
-        ui[uiKey] = next;
+    const slot = cur();
+    const next = ((slot[uiKey] | 0) + steps + count * 100) % count;
+    if (next !== slot[uiKey]) {
+        slot[uiKey] = next;
         setDspParam(key, String(next));
     }
 }
@@ -274,11 +283,12 @@ function adjustEnum(key, uiKey, delta, count) {
 function adjustLength(delta) {
     const steps = consumeDetents("length", delta);
     if (steps === 0) return;
-    const idx = LENGTHS.indexOf(ui.length);
-    const cur = idx < 0 ? 1 : idx;
-    const next = LENGTHS[clamp(cur + steps, 0, LENGTHS.length - 1)];
-    if (next !== ui.length) {
-        ui.length = next;
+    const slot = cur();
+    const idx = LENGTHS.indexOf(slot.length);
+    const curIdx = idx < 0 ? 1 : idx;
+    const next = LENGTHS[clamp(curIdx + steps, 0, LENGTHS.length - 1)];
+    if (next !== slot.length) {
+        slot.length = next;
         setDspParam("length", String(next));
     }
 }
@@ -292,25 +302,25 @@ let patternStale = false;  // true when prob-knobs have changed since last gener
 function scalePageItems() {
     return [
         createEnum("K5: Root", {
-            get: () => ui.root,
-            set: (v) => { ui.root = v; setDspParam("root", String(v)); },
+            get: () => cur().root,
+            set: (v) => { cur().root = v; setDspParam("root", String(v)); },
             options: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             format: (v) => ROOT_NAMES[v] || "?"
         }),
         createEnum("K6: Scale", {
-            get: () => ui.scale,
-            set: (v) => { ui.scale = v; setDspParam("scale", String(v)); },
+            get: () => cur().scale,
+            set: (v) => { cur().scale = v; setDspParam("scale", String(v)); },
             options: SCALE_NAMES.map((_, i) => i),
             format: (v) => SCALE_NAMES[v] || "?"
         }),
         createEnum("K7: Length", {
-            get: () => ui.length,
-            set: (v) => { ui.length = v; setDspParam("length", String(v)); },
+            get: () => cur().length,
+            set: (v) => { cur().length = v; setDspParam("length", String(v)); },
             options: LENGTHS
         }),
         createValue("K8: Gate", {
-            get: () => Math.round(ui.gate * 100),
-            set: (v) => { ui.gate = v / 100; setDspParam("gate", (v / 100).toFixed(3)); },
+            get: () => Math.round(cur().gate * 100),
+            set: (v) => { cur().gate = v / 100; setDspParam("gate", (v / 100).toFixed(3)); },
             min: 10, max: 100,
             format: (v) => v + "%"
         })
@@ -321,23 +331,23 @@ function mutationPageItems() {
     const setStale = () => { patternStale = true; };
     return [
         createValue("K1: Density", {
-            get: () => Math.round(ui.density * 100),
-            set: (v) => { ui.density = v / 100; setDspParam("density", (v / 100).toFixed(3)); setStale(); },
+            get: () => Math.round(cur().density * 100),
+            set: (v) => { cur().density = v / 100; setDspParam("density", (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
         createValue("K2: Accent", {
-            get: () => Math.round(ui.accent * 100),
-            set: (v) => { ui.accent = v / 100; setDspParam("accent", (v / 100).toFixed(3)); setStale(); },
+            get: () => Math.round(cur().accent * 100),
+            set: (v) => { cur().accent = v / 100; setDspParam("accent", (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
         createValue("K3: Slide", {
-            get: () => Math.round(ui.slide * 100),
-            set: (v) => { ui.slide = v / 100; setDspParam("slide", (v / 100).toFixed(3)); setStale(); },
+            get: () => Math.round(cur().slide * 100),
+            set: (v) => { cur().slide = v / 100; setDspParam("slide", (v / 100).toFixed(3)); setStale(); },
             min: 0, max: 100, format: (v) => v + "%"
         }),
         createValue("K4: Octaves", {
-            get: () => ui.octaves,
-            set: (v) => { ui.octaves = v; setDspParam("octaves", String(v)); setStale(); },
+            get: () => cur().octaves,
+            set: (v) => { cur().octaves = v; setDspParam("octaves", String(v)); setStale(); },
             min: 1, max: 3
         })
     ];
@@ -346,8 +356,8 @@ function mutationPageItems() {
 function channelPageItems() {
     return [
         createValue("MIDI Ch", {
-            get: () => ui.channel,
-            set: (v) => { ui.channel = v; setDspParam("channel", String(v)); },
+            get: () => cur().channel,
+            set: (v) => { cur().channel = v; setDspParam("channel", String(v)); },
             min: 1, max: 16
         })
     ];
@@ -378,7 +388,7 @@ function adjustMenuItem(item, delta) {
 
 function handleJogTurn(delta) {
     if (delta === 0) return;
-    const state = menuState[currentPage];
+    const state = cur().menuState[currentPage];
     const items = currentPageItems();
     if (!state || !items || items.length === 0) return;
 
@@ -399,7 +409,7 @@ function handleJogTurn(delta) {
 }
 
 function handleJogClick() {
-    const state = menuState[currentPage];
+    const state = cur().menuState[currentPage];
     const items = currentPageItems();
     if (!state || !items || items.length === 0) return;
     const item = items[state.selectedIndex];
@@ -414,26 +424,27 @@ function handleJogClick() {
 }
 
 function knobOverlayInfo(idx) {
-    if (controlMode === MODE_303) {
+    const slot = cur();
+    if (slot.mode === MODE_303) {
         const label = CC_303_LABELS[idx] || "?";
-        return { name: "303 " + label, value: String(cc303Values[idx] | 0) };
+        return { name: "303 " + label, value: String(slot.cc303[idx] | 0) };
     }
     switch (idx) {
-        case 0: return { name: "Density", value: Math.round(ui.density * 100) + "%" };
-        case 1: return { name: "Accent",  value: Math.round(ui.accent  * 100) + "%" };
-        case 2: return { name: "Slide",   value: Math.round(ui.slide   * 100) + "%" };
-        case 3: return { name: "Octaves", value: String(ui.octaves) };
-        case 4: return { name: "Root",    value: ROOT_NAMES[ui.root] || "?" };
-        case 5: return { name: "Scale",   value: SCALE_NAMES[ui.scale] || "?" };
-        case 6: return { name: "Length",  value: ui.length + " steps" };
-        case 7: return { name: "Gate",    value: Math.round(ui.gate * 100) + "%" };
+        case 0: return { name: "Density", value: Math.round(slot.density * 100) + "%" };
+        case 1: return { name: "Accent",  value: Math.round(slot.accent  * 100) + "%" };
+        case 2: return { name: "Slide",   value: Math.round(slot.slide   * 100) + "%" };
+        case 3: return { name: "Octaves", value: String(slot.octaves) };
+        case 4: return { name: "Root",    value: ROOT_NAMES[slot.root] || "?" };
+        case 5: return { name: "Scale",   value: SCALE_NAMES[slot.scale] || "?" };
+        case 6: return { name: "Length",  value: slot.length + " steps" };
+        case 7: return { name: "Gate",    value: Math.round(slot.gate * 100) + "%" };
     }
     return null;
 }
 
 function handleKnob(knobIdx, delta) {
     if (delta === 0) return;
-    if (controlMode === MODE_303) {
+    if (cur().mode === MODE_303) {
         send303Cc(knobIdx, delta);
     } else {
         switch (knobIdx) {
@@ -477,29 +488,31 @@ function find303Slot() {
 }
 
 function sync303FromPlugin() {
-    // Pull the 303's current param values into cc303Values (0..127) so the
+    // Pull the 303's current param values into cur().cc303 (0..127) so the
     // first knob turn doesn't jump the synth, and so the displayed value
     // actually reflects reality.
     if (typeof shadow_get_param !== "function") return;
     if (cc303SlotIdx < 0) cc303SlotIdx = find303Slot();
     if (cc303SlotIdx < 0) return;
+    const slot = cur();
     for (let i = 0; i < CC_303_PARAM_KEYS.length; i++) {
         const v = shadow_get_param(cc303SlotIdx, CC_303_PARAM_KEYS[i]);
         if (v === null || v === "") continue;
         const fv = parseFloat(v);
         if (!isFinite(fv)) continue;
-        cc303Values[i] = Math.round(clamp(fv * 127, 0, 127));
+        slot.cc303[i] = Math.round(clamp(fv * 127, 0, 127));
     }
 }
 
 function send303Cc(knobIdx, delta) {
     const cc = CC_303[knobIdx];
     if (cc === undefined || delta === 0) return;
-    const next = clamp((cc303Values[knobIdx] | 0) + delta, 0, 127);
-    if (next === cc303Values[knobIdx]) return;
-    cc303Values[knobIdx] = next;
+    const slot = cur();
+    const next = clamp((slot.cc303[knobIdx] | 0) + delta, 0, 127);
+    if (next === slot.cc303[knobIdx]) return;
+    slot.cc303[knobIdx] = next;
     if (typeof shadow_send_midi_to_dsp === "function") {
-        const chStatus = 0xB0 | ((ui.channel - 1) & 0x0F);
+        const chStatus = 0xB0 | ((slot.channel - 1) & 0x0F);
         shadow_send_midi_to_dsp([chStatus, cc, next]);
     }
 }
@@ -507,10 +520,11 @@ function send303Cc(knobIdx, delta) {
 // -------- Pad handling ----------
 
 function cycleStepState(stepIdx) {
-    if (stepIdx < 0 || stepIdx >= ui.length) return;
-    const cur = ui.steps[stepIdx] | 0;
-    const next = (cur + 1) & 3;  // rest → note → accent → slide → rest
-    ui.steps[stepIdx] = next;
+    const slot = cur();
+    if (stepIdx < 0 || stepIdx >= slot.length) return;
+    const prev = slot.steps[stepIdx] | 0;
+    const next = (prev + 1) & 3;  // rest → note → accent → slide → rest
+    slot.steps[stepIdx] = next;
     setDspParam("set_step", stepIdx + ":" + next);
 }
 
@@ -520,28 +534,29 @@ function handlePadNoteOn(note, vel) {
     if (padIdx < 0 || padIdx > 31) return;
     const row = Math.floor(padIdx / 8);  // 0 bottom, 3 top
     const col = padIdx % 8;
+    const slot = cur();
 
     if (row === 3) {                     // top row: first 8 steps of current page
-        cycleStepState(stepView * 16 + col);
+        cycleStepState(slot.stepView * 16 + col);
     } else if (row === 2) {              // next 8 steps of current page
-        cycleStepState(stepView * 16 + 8 + col);
+        cycleStepState(slot.stepView * 16 + 8 + col);
     } else if (row === 1) {              // banks (Shift = store, plain = recall-at-next-bar)
         const bn = col + 1;
         if (shiftHeld) {
             setDspParam("store_bank", String(col));
-            ui.currentBank = col;
+            slot.currentBank = col;
             showOverlay("Bank " + bn, "saved");
         } else {
             if (ui.running) {
                 /* Queue the recall; DSP applies at next bar boundary. */
                 setDspParam("recall_bank", String(col));
-                ui.pendingRecall = col;
+                slot.pendingRecall = col;
                 showOverlay("Bank " + bn, "queued");
             } else {
                 /* Transport stopped — no bar boundary coming, apply now. */
                 setDspParam("recall_bank_now", String(col));
-                ui.currentBank = col;
-                ui.pendingRecall = -1;
+                slot.currentBank = col;
+                slot.pendingRecall = -1;
                 showOverlay("Bank " + bn, "recalled");
             }
         }
@@ -557,17 +572,17 @@ function handlePadNoteOn(note, vel) {
                 showOverlay("Pattern", "mutated");
                 break;
             case 2:
-                ui.direction = (ui.direction + 1) & 3;
-                setDspParam("direction", String(ui.direction));
-                showOverlay("Direction", DIRECTIONS[ui.direction] || "?");
+                slot.direction = (slot.direction + 1) & 3;
+                setDspParam("direction", String(slot.direction));
+                showOverlay("Direction", DIRECTIONS[slot.direction] || "?");
                 break;
             case 3:
                 adjustInt("channel", "channel", -1, 1, 16);
-                showOverlay("Channel", String(ui.channel));
+                showOverlay("Channel", String(cur().channel));
                 break;
             case 4:
                 adjustInt("channel", "channel", +1, 1, 16);
-                showOverlay("Channel", String(ui.channel));
+                showOverlay("Channel", String(cur().channel));
                 break;
             default: break;
         }
@@ -625,21 +640,22 @@ function refreshLeds() {
         ledForceNextRefresh = true;
     }
     lastRefreshMs = now;
-    const pageBase = stepView * 16;
+    const slot = cur();
+    const pageBase = slot.stepView * 16;
 
     // Rows 2 & 3 — step grid for the current 16-step page. Cursor = bright
     // Use YELLOW for the cursor — white collided with plain NOTE steps which
     // are also white, making the cursor invisible on those pads.
     for (let col = 0; col < 8; col++) {
         const step = pageBase + col;
-        let color = (step < ui.length) ? stepLedColor(ui.steps[step]) : LED_OFF;
-        if (ui.running && step === ui.position) color = LED_YELLOW;
+        let color = (step < slot.length) ? stepLedColor(slot.steps[step]) : LED_OFF;
+        if (ui.running && step === slot.position) color = LED_YELLOW;
         setLed(3, col, color);
     }
     for (let col = 0; col < 8; col++) {
         const step = pageBase + 8 + col;
-        let color = (step < ui.length) ? stepLedColor(ui.steps[step]) : LED_OFF;
-        if (ui.running && step === ui.position) color = LED_YELLOW;
+        let color = (step < slot.length) ? stepLedColor(slot.steps[step]) : LED_OFF;
+        if (ui.running && step === slot.position) color = LED_YELLOW;
         setLed(2, col, color);
     }
 
@@ -652,12 +668,12 @@ function refreshLeds() {
         if (shiftHeld) {
             // Save-mode cue — all slots pulse red so the user sees "these
             // are save targets now".
-            color = (col === ui.currentBank) ? LED_WHITE : (flashPhase ? LED_RED : LED_PINK);
-        } else if (col === ui.pendingRecall && flashPhase) {
+            color = (col === slot.currentBank) ? LED_WHITE : (flashPhase ? LED_RED : LED_PINK);
+        } else if (col === slot.pendingRecall && flashPhase) {
             color = LED_YELLOW;
-        } else if (col === ui.currentBank) {
+        } else if (col === slot.currentBank) {
             color = LED_PURPLE;
-        } else if (ui.bankFilled[col]) {
+        } else if (slot.bankFilled[col]) {
             color = LED_TEAL;
         } else {
             color = LED_OFF;
@@ -687,9 +703,9 @@ function refreshLeds() {
 
     // Track buttons 1..2 — knob mode indicator. Track 2 only lights when a
     // 303 is actually loaded somewhere tb3po can reach.
-    setTrackLed(CC_TRACK1, controlMode === MODE_3PO ? LED_TEAL : LED_DARK_GREY);
+    setTrackLed(CC_TRACK1, slot.mode === MODE_3PO ? LED_TEAL : LED_DARK_GREY);
     if (has303Slot) {
-        setTrackLed(CC_TRACK2, controlMode === MODE_303 ? LED_ORANGE : LED_DARK_GREY);
+        setTrackLed(CC_TRACK2, slot.mode === MODE_303 ? LED_ORANGE : LED_DARK_GREY);
     } else {
         setTrackLed(CC_TRACK2, LED_OFF);
     }
@@ -717,13 +733,14 @@ const PAD_ACTION_LABELS = ["NEW", "MUT", "DIR", "Ch-", "Ch+", "", "", ""];
 function drawStepGrid(y) {
     if (typeof draw_rect !== "function" || typeof fill_rect !== "function") return;
     clampStepView();
-    const pageBase = stepView * 16;
-    const nVisible = Math.max(0, Math.min(16, ui.length - pageBase));
+    const slot = cur();
+    const pageBase = slot.stepView * 16;
+    const nVisible = Math.max(0, Math.min(16, slot.length - pageBase));
     for (let i = 0; i < nVisible; i++) {
         const x = i * 8;
         const step = pageBase + i;
-        const s = ui.steps[step];
-        const isNow = (step === ui.position);
+        const s = slot.steps[step];
+        const isNow = (step === slot.position);
         if (s === STEP_REST) {
             draw_rect(x + 2, y + 2, 4, 4, 1);
         } else if (s === STEP_NOTE) {
@@ -755,20 +772,21 @@ function drawPageFooter(y) {
 }
 
 function drawPerformPage() {
-    const scaleName = (SCALE_NAMES[ui.scale] || "?").substr(0, 3);
-    const rootName = ROOT_NAMES[ui.root] || "?";
-    const dirName = DIRECTIONS[ui.direction] || "?";
+    const slot = cur();
+    const scaleName = (SCALE_NAMES[slot.scale] || "?").substr(0, 3);
+    const rootName = ROOT_NAMES[slot.root] || "?";
+    const dirName = DIRECTIONS[slot.direction] || "?";
     if (typeof print === "function") {
         // 21-char max: "Amin 120 EXT Ch1 B1 F"
         print(0, 0, rootName + scaleName + " " + (ui.bpm | 0) + " " +
-                     ui.syncSource + " Ch" + ui.channel + " B" + (ui.currentBank + 1) +
+                     ui.syncSource + " Ch" + slot.channel + " B" + (slot.currentBank + 1) +
                      " " + dirName.charAt(0), 1);
     }
     drawStepGrid(12);
     if (typeof print === "function") {
-        const modeTxt = "knobs: " + MODE_NAMES[controlMode];
-        const pageTxt = stepPageCount() > 1 ? ("  pg" + (stepView + 1) + "/" + stepPageCount()) : "";
-        print(0, 26, "Pos " + (ui.position + 1) + "/" + ui.length + pageTxt + "  " + modeTxt, 1);
+        const modeTxt = "knobs: " + MODE_NAMES[slot.mode];
+        const pageTxt = stepPageCount() > 1 ? ("  pg" + (slot.stepView + 1) + "/" + stepPageCount()) : "";
+        print(0, 26, "Pos " + (slot.position + 1) + "/" + slot.length + pageTxt + "  " + modeTxt, 1);
         if (patternStale) {
             print(0, 40, "* press Pad 1 for NEW", 1);
         } else if (stepPageCount() > 1) {
@@ -804,21 +822,22 @@ function drawMenuList(items, state, startY) {
 }
 
 function drawMutationPage() {
-    if (controlMode === MODE_303) {
+    const slot = cur();
+    if (slot.mode === MODE_303) {
         // 303 mode — knobs 1-4 map to Cutoff/Reson/Decay/EnvMod.
         if (typeof print !== "function") return;
         print(0, 0, "303 Control 1 (K1-K4)", 1);
-        print(0, 14, "K1 Cutoff: " + cc303Values[0], 1);
-        print(0, 24, "K2 Reson:  " + cc303Values[1], 1);
-        print(0, 34, "K3 Decay:  " + cc303Values[2], 1);
-        print(0, 44, "K4 EnvMod: " + cc303Values[3], 1);
+        print(0, 14, "K1 Cutoff: " + slot.cc303[0], 1);
+        print(0, 24, "K2 Reson:  " + slot.cc303[1], 1);
+        print(0, 34, "K3 Decay:  " + slot.cc303[2], 1);
+        print(0, 44, "K4 EnvMod: " + slot.cc303[3], 1);
         print(0, 56, "T1 to return to 3PO", 1);
         return;
     }
     if (typeof print === "function") {
         print(0, 0, "MUTATION" + (patternStale ? "  * stale" : ""), 1);
     }
-    drawMenuList(mutationPageItems(), menuState[PAGE_MUTATION], 14);
+    drawMenuList(mutationPageItems(), slot.menuState[PAGE_MUTATION], 14);
     if (typeof print === "function") {
         print(0, 56, "Jog nav/edit  P1 NEW", 1);
     }
@@ -826,25 +845,26 @@ function drawMutationPage() {
 
 function drawScalePage() {
     if (typeof print !== "function") return;
-    if (controlMode === MODE_303) {
+    const slot = cur();
+    if (slot.mode === MODE_303) {
         // 303 mode — knobs 5-8 map to Accent/Volume/Ovdrv/Ovdrv Mix.
         print(0, 0,  "303 Control 2 (K5-K8)", 1);
-        print(0, 14, "K5 Accent:    " + cc303Values[4], 1);
-        print(0, 24, "K6 Volume:    " + cc303Values[5], 1);
-        print(0, 34, "K7 Overdrive: " + cc303Values[6], 1);
-        print(0, 44, "K8 Ovdrv Mix: " + cc303Values[7], 1);
+        print(0, 14, "K5 Accent:    " + slot.cc303[4], 1);
+        print(0, 24, "K6 Volume:    " + slot.cc303[5], 1);
+        print(0, 34, "K7 Overdrive: " + slot.cc303[6], 1);
+        print(0, 44, "K8 Ovdrv Mix: " + slot.cc303[7], 1);
         print(0, 56, "T1 to return to 3PO", 1);
         return;
     }
     print(0, 0, "SCALE", 1);
-    drawMenuList(scalePageItems(), menuState[PAGE_SCALE], 14);
+    drawMenuList(scalePageItems(), slot.menuState[PAGE_SCALE], 14);
     print(0, 56, "Jog nav/edit  Knobs 5-8", 1);
 }
 
 function drawChannelPage() {
     if (typeof print !== "function") return;
     print(0, 0, "MIDI CHANNEL", 1);
-    drawMenuList(channelPageItems(), menuState[PAGE_CHANNEL], 20);
+    drawMenuList(channelPageItems(), cur().menuState[PAGE_CHANNEL], 20);
     print(0, 56, "Jog nav/edit", 1);
 }
 
@@ -881,7 +901,7 @@ globalThis.init = function() {
     // doesn't itself produce audio. Without a shadow slot listening on that
     // channel, nothing is heard. Show this once on load so the user knows
     // where to point a synth.
-    showOverlay("MIDI -> Ch " + ui.channel, "route a synth", 360);
+    showOverlay("MIDI -> Ch " + cur().channel, "route a synth", 360);
 };
 
 globalThis.tick = function() {
@@ -942,37 +962,41 @@ globalThis.onMidiMessageInternal = function(data) {
 
     // + / − buttons = octave up / down.
     if (type === 0xB0 && d1 === CC_DOWN && d2 > 0) {
-        ui.transpose = Math.max(-48, (ui.transpose | 0) - 12);
-        setDspParam("transpose", String(ui.transpose));
-        showOverlay("Transpose", (ui.transpose / 12) + " oct");
+        const slot = cur();
+        slot.transpose = Math.max(-48, (slot.transpose | 0) - 12);
+        setDspParam("transpose", String(slot.transpose));
+        showOverlay("Transpose", (slot.transpose / 12) + " oct");
         return;
     }
     if (type === 0xB0 && d1 === CC_UP && d2 > 0) {
-        ui.transpose = Math.min( 48, (ui.transpose | 0) + 12);
-        setDspParam("transpose", String(ui.transpose));
-        showOverlay("Transpose", (ui.transpose / 12) + " oct");
+        const slot = cur();
+        slot.transpose = Math.min( 48, (slot.transpose | 0) + 12);
+        setDspParam("transpose", String(slot.transpose));
+        showOverlay("Transpose", (slot.transpose / 12) + " oct");
         return;
     }
 
     // Left / Right buttons paginate the step grid when the pattern is > 16.
     if (type === 0xB0 && d1 === CC_LEFT && d2 > 0) {
-        if (stepPageCount() > 1 && stepView > 0) {
-            stepView--;
-            showOverlay("Steps", (stepView * 16 + 1) + "-" + Math.min(ui.length, (stepView + 1) * 16));
+        const slot = cur();
+        if (stepPageCount() > 1 && slot.stepView > 0) {
+            slot.stepView--;
+            showOverlay("Steps", (slot.stepView * 16 + 1) + "-" + Math.min(slot.length, (slot.stepView + 1) * 16));
         }
         return;
     }
     if (type === 0xB0 && d1 === CC_RIGHT && d2 > 0) {
-        if (stepPageCount() > 1 && stepView < stepPageCount() - 1) {
-            stepView++;
-            showOverlay("Steps", (stepView * 16 + 1) + "-" + Math.min(ui.length, (stepView + 1) * 16));
+        const slot = cur();
+        if (stepPageCount() > 1 && slot.stepView < stepPageCount() - 1) {
+            slot.stepView++;
+            showOverlay("Steps", (slot.stepView * 16 + 1) + "-" + Math.min(slot.length, (slot.stepView + 1) * 16));
         }
         return;
     }
 
     // Track 1 / Track 2 buttons switch knob mode.
     if (type === 0xB0 && d1 === CC_TRACK1 && d2 > 0) {
-        controlMode = MODE_3PO;
+        cur().mode = MODE_3PO;
         showOverlay("Knob mode", "3PO");
         return;
     }
@@ -982,10 +1006,10 @@ globalThis.onMidiMessageInternal = function(data) {
         cc303SlotIdx = find303Slot();
         has303Slot = cc303SlotIdx >= 0;
         if (!has303Slot) {
-            showOverlay("No 303 loaded", "route a 303 to Ch" + ui.channel);
+            showOverlay("No 303 loaded", "route a 303 to Ch" + cur().channel);
             return;
         }
-        controlMode = MODE_303;
+        cur().mode = MODE_303;
         sync303FromPlugin();
         showOverlay("Knob mode", "303 CCs");
         return;
@@ -995,7 +1019,7 @@ globalThis.onMidiMessageInternal = function(data) {
     if (type === 0xB0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
         const knobIdx = d1 - CC_KNOB_BASE;
         const raw = decodeDelta(d2);
-        const gain = (controlMode === MODE_303) ? KNOB_GAIN_303 : KNOB_GAIN_3PO;
+        const gain = (cur().mode === MODE_303) ? KNOB_GAIN_303 : KNOB_GAIN_3PO;
         handleKnob(knobIdx, scaleDelta(raw, gain));
         return;
     }
@@ -1005,11 +1029,11 @@ globalThis.onMidiMessageInternal = function(data) {
     // MUTATION and SCALE only in 3PO mode since 303 mode reuses those pages
     // to show the live CC readouts.
     if (type === 0xB0 && d1 === 14) {
-        const on3poMenu = controlMode === MODE_3PO &&
+        const on3poMenu = cur().mode === MODE_3PO &&
             (currentPage === PAGE_MUTATION || currentPage === PAGE_SCALE);
         const onChannel = currentPage === PAGE_CHANNEL;
         if (!on3poMenu && !onChannel) return;
-        const state = menuState[currentPage];
+        const state = cur().menuState[currentPage];
         if (!state) return;
         // Nav mode: 1 detent = 1 row (no acceleration, prevents overshoot on
         // short lists). Edit mode: gain-scaled so fast spins sweep quickly.
@@ -1021,7 +1045,7 @@ globalThis.onMidiMessageInternal = function(data) {
 
     // Jog click (CC 3, main button) — enter/confirm edit.
     if (type === 0xB0 && d1 === 3 && d2 > 0) {
-        const on3poMenu = controlMode === MODE_3PO &&
+        const on3poMenu = cur().mode === MODE_3PO &&
             (currentPage === PAGE_MUTATION || currentPage === PAGE_SCALE);
         const onChannel = currentPage === PAGE_CHANNEL;
         if (!on3poMenu && !onChannel) return;
