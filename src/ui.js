@@ -364,24 +364,13 @@ function adjustMenuItem(item, delta) {
     if (!item || delta === 0 || !item.set || !item.get) return;
     const cur = item.get();
     if (item.type === "value") {
-        // Short-range values (octaves 1..3, MIDI ch 1..16) would whip through
-        // on a plain detent-to-unit mapping, so drain through the same
-        // detent accumulator used by the knob enum path.
-        const range = (item.max | 0) - (item.min | 0);
-        const useDetents = range <= 16;
-        const steps = useDetents
-            ? consumeDetents("menu:" + item.label, delta)
-            : delta;
-        if (steps === 0) return;
-        const next = clamp(cur + steps, item.min, item.max);
+        const next = clamp(cur + delta, item.min, item.max);
         if (next !== cur) item.set(next);
     } else if (item.type === "enum") {
         const opts = item.options || [];
         if (opts.length === 0) return;
-        const steps = consumeDetents("menu:" + item.label, delta);
-        if (steps === 0) return;
         const idx = opts.indexOf(cur);
-        const newIdx = ((idx < 0 ? 0 : idx) + steps + opts.length * 100) % opts.length;
+        const newIdx = ((idx < 0 ? 0 : idx) + delta + opts.length * 100) % opts.length;
         const next = opts[newIdx];
         if (next !== cur) item.set(next);
     }
