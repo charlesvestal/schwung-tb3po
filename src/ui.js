@@ -481,9 +481,12 @@ let cc303SlotIdx = -1;
 let has303Slot = false;
 
 // Param keys 303 plugin exposes via get_param, matching CC_303 index order.
+// Note: CC 12/13 on the 303 were "overdrive_level"/"overdrive_dry_wet" in
+// pre-0.3.0 and are now "drive"/"drive_mix" (same CCs, renamed params since
+// the LSTM overdrive was replaced with the Soft/RAT drive stage).
 const CC_303_PARAM_KEYS = [
     "cutoff", "resonance", "decay", "env_mod",
-    "accent", "volume", "overdrive_level", "overdrive_dry_wet"
+    "accent", "volume", "drive", "drive_mix"
 ];
 
 function find303Slot() {
@@ -882,12 +885,12 @@ function drawScalePage() {
     if (typeof print !== "function") return;
     const slot = cur();
     if (slot.mode === MODE_303) {
-        // 303 mode — knobs 5-8 map to Accent/Volume/Ovdrv/Ovdrv Mix.
+        // 303 mode — knobs 5-8 map to Accent/Volume/Drive/Mix.
         print(0, 0,  "303 Control 2 (K5-K8)", 1);
-        print(0, 14, "K5 Accent:    " + slot.cc303[4], 1);
-        print(0, 24, "K6 Volume:    " + slot.cc303[5], 1);
-        print(0, 34, "K7 Overdrive: " + slot.cc303[6], 1);
-        print(0, 44, "K8 Ovdrv Mix: " + slot.cc303[7], 1);
+        print(0, 14, "K5 Accent: " + slot.cc303[4], 1);
+        print(0, 24, "K6 Volume: " + slot.cc303[5], 1);
+        print(0, 34, "K7 Drive:  " + slot.cc303[6], 1);
+        print(0, 44, "K8 Mix:    " + slot.cc303[7], 1);
         print(0, 56, "T1 to return to 3PO", 1);
         return;
     }
