@@ -433,19 +433,21 @@ function handleJogClick() {
 
 function knobOverlayInfo(idx) {
     const slot = cur();
+    const slotTag = ui.activeSlot === 0 ? "A" : "B";
     if (slot.mode === MODE_303) {
         const label = CC_303_LABELS[idx] || "?";
-        return { name: "303 " + label, value: String(slot.cc303[idx] | 0) };
+        return { name: "303-" + slotTag + " " + label, value: String(slot.cc303[idx] | 0) };
     }
+    const prefix = "TB-" + slotTag + " ";
     switch (idx) {
-        case 0: return { name: "Density", value: Math.round(slot.density * 100) + "%" };
-        case 1: return { name: "Accent",  value: Math.round(slot.accent  * 100) + "%" };
-        case 2: return { name: "Slide",   value: Math.round(slot.slide   * 100) + "%" };
-        case 3: return { name: "Octaves", value: String(slot.octaves) };
-        case 4: return { name: "Root",    value: ROOT_NAMES[slot.root] || "?" };
-        case 5: return { name: "Scale",   value: SCALE_NAMES[slot.scale] || "?" };
-        case 6: return { name: "Length",  value: slot.length + " steps" };
-        case 7: return { name: "Gate",    value: Math.round(slot.gate * 100) + "%" };
+        case 0: return { name: prefix + "Density", value: Math.round(slot.density * 100) + "%" };
+        case 1: return { name: prefix + "Accent",  value: Math.round(slot.accent  * 100) + "%" };
+        case 2: return { name: prefix + "Slide",   value: Math.round(slot.slide   * 100) + "%" };
+        case 3: return { name: prefix + "Octaves", value: String(slot.octaves) };
+        case 4: return { name: prefix + "Root",    value: ROOT_NAMES[slot.root] || "?" };
+        case 5: return { name: prefix + "Scale",   value: SCALE_NAMES[slot.scale] || "?" };
+        case 6: return { name: prefix + "Length",  value: slot.length + " steps" };
+        case 7: return { name: prefix + "Gate",    value: Math.round(slot.gate * 100) + "%" };
     }
     return null;
 }
@@ -732,10 +734,10 @@ function refreshLeds() {
     setLed(0, 6, LED_OFF);
     setLed(0, 7, LED_OFF);
 
-    // Step buttons 1..NUM_PAGES — page selector. Current page bright, others dim.
+    // Step buttons 1..NUM_PAGES — page selector. Available = white, current = green.
     for (let i = 0; i < NUM_STEP_BUTTONS; i++) {
         if (i < NUM_PAGES) {
-            setStepLed(i, (i === currentPage) ? LED_WHITE : LED_DARK_GREY);
+            setStepLed(i, (i === currentPage) ? LED_GREEN : LED_WHITE);
         } else {
             setStepLed(i, LED_OFF);
         }
@@ -754,7 +756,9 @@ function refreshLeds() {
     setTrackLed(CC_DOWN,   LED_DARK_GREY);                 // -  octave down
     setTrackLed(CC_LEFT,   stepPageCount() > 1 ? LED_DARK_GREY : LED_OFF);
     setTrackLed(CC_RIGHT,  stepPageCount() > 1 ? LED_DARK_GREY : LED_OFF);
-    setTrackLed(CC_DELETE, LED_RED);                       // X  CLEAR (red warn)
+    setTrackLed(CC_SHIFT,  LED_WHITE);                     // Shift modifier
+    setTrackLed(CC_BACK,   LED_WHITE);                     // Back / suspend
+    setTrackLed(CC_DELETE, LED_WHITE);                     // X  CLEAR (Shift+X to confirm)
     setTrackLed(CC_UNDO,   LED_DARK_GREY);                 // Undo last op
 
     // Clear the force-refresh flag now that all LEDs have been written.

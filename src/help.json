@@ -3,67 +3,142 @@
     "subtitle": "Generative 303-style acid sequencer",
     "sections": [
         {
-            "heading": "Routing",
+            "heading": "Overview",
             "body": [
-                "TB-3PO emits MIDI on a configurable channel (1–16).",
-                "Load a synth into a shadow slot (hush1, Bristol, OB-Xd, Moog, …)",
-                "and set the slot's receive channel to match TB-3PO's channel to hear it."
+                "Two independent slots (A and B) run in parallel, each",
+                "with its own pattern, MIDI channel, and bank set.",
+                "Load a resonant monosynth into a shadow slot (303,",
+                "Bristol, OB-Xd, Moog, …) and match its receive channel",
+                "to the slot you want to drive."
             ]
         },
         {
-            "heading": "Knobs",
+            "heading": "Slots & Modes (T1–T4)",
+            "body": [
+                "T1  Slot A — 3PO  (sequencer knobs)",
+                "T2  Slot A — 303  (live CC controller for a 303)",
+                "T3  Slot B — 3PO  (sequencer knobs)",
+                "T4  Slot B — 303  (live CC controller for a 303)",
+                "",
+                "Both slots sequence at all times. Track buttons just",
+                "switch which slot the 8 knobs and pads are editing.",
+                "Active slot/mode lights bright (teal=3PO, orange=303);",
+                "a 303-mode button is dark unless a 303 plugin is loaded."
+            ]
+        },
+        {
+            "heading": "Knobs — 3PO mode",
             "body": [
                 "1  Density    — chance of a note vs a rest per step",
                 "2  Accent     — chance of a note being an accent (loud)",
                 "3  Slide      — chance of a note sliding into the next",
-                "4  Octaves    — octave range to spread notes across (1–3)",
+                "4  Octaves    — octave range (1–3)",
                 "5  Root       — key root (C, C#, …, B)",
-                "6  Scale      — Minor / Phrygian / HarmMinor / MinPent / Dorian / Major",
+                "6  Scale      — Minor / Phrygian / HarmMinor /",
+                "                MinPent / Dorian / Major",
                 "7  Length     — pattern length (8, 16, 24, 32 steps)",
-                "8  Gate       — note length as % of step time"
+                "8  Gate       — note length as % of step time",
+                "",
+                "Knobs 1–4 mark the pattern stale — press NEW (pad 1)",
+                "to regenerate, or Mutate (pad 2) to nudge ~25% of steps."
             ]
         },
         {
-            "heading": "Pads (4 rows, bottom = row 1)",
+            "heading": "Knobs — 303 mode",
             "body": [
-                "Row 4 (top): steps 1–8. Tap cycles rest → note → accent → slide.",
-                "Row 3:       steps 9–16 (for patterns longer than 8).",
-                "Row 2:       pattern banks 1–8. Tap to recall, Shift+tap to store.",
-                "Row 1:       actions, left to right:",
-                "  New     regenerate pattern from a fresh seed",
-                "  Mutate  nudge ~25% of existing steps",
-                "  Dir     cycle direction: Fwd / Rev / Ping / Rnd",
-                "  Clear   clear all steps",
-                "  Stop    stop the sequencer",
-                "  Play    start the sequencer",
-                "  Ch−/Ch+ decrement / increment MIDI out channel"
+                "Live CC controller for a schwung-303 on the slot's",
+                "MIDI channel. The 8 knobs send standard 303 CCs:",
+                "",
+                "1  Cutoff       (CC 74)",
+                "2  Resonance    (CC 71)",
+                "3  Decay        (CC 75)",
+                "4  Env Mod      (CC 70)",
+                "5  Accent       (CC 16)",
+                "6  Volume       (CC 7)",
+                "7  Drive        (CC 12)",
+                "8  Drive Mix    (CC 13)",
+                "",
+                "On 303-mode entry, knob values sync to the plugin's",
+                "current params so the first turn doesn't jump."
+            ]
+        },
+        {
+            "heading": "Pages (Step buttons 1–5)",
+            "body": [
+                "1  PERFORM        — pattern view + step grid",
+                "2  MUTATION       — jog-edit Density/Accent/Slide/Oct",
+                "3  SCALE          — jog-edit Root/Scale/Length/Gate",
+                "4  CHANNEL        — jog-edit MIDI out channel (1–16)",
+                "5  HELP           — on-screen pad map",
+                "",
+                "In 303 mode, pages 2 and 3 show 303 Control 1/2 with",
+                "live CC readouts for K1–K4 and K5–K8."
+            ]
+        },
+        {
+            "heading": "Pads (4 rows, top = row 3)",
+            "body": [
+                "Row 3 (top): steps 1–8 of the current step page.",
+                "Row 2:       steps 9–16 of the current step page.",
+                "             Tap cycles rest → note → accent → slide.",
+                "Row 1:       pattern banks 1–8.",
+                "             Tap = recall (queued to next bar if",
+                "             playing), Shift+tap = save current to bank.",
+                "Row 0:       1 NEW    regenerate from a fresh seed",
+                "             2 MUT    nudge ~25% of existing steps",
+                "             3 DIR    cycle Fwd / Rev / Ping / Rnd",
+                "             4 Ch−    decrement MIDI out channel",
+                "             5 Ch+    increment MIDI out channel"
+            ]
+        },
+        {
+            "heading": "Hardware buttons",
+            "body": [
+                "+ / −        transpose ±1 octave (clamped ±48 semitones)",
+                "← / →        step page (for 24/32-step patterns)",
+                "X (Delete)   CLEAR — gated, requires Shift+X",
+                "Undo         revert last NEW / MUTATE / CLEAR",
+                "Play         transport (passthrough to Move firmware)"
             ]
         },
         {
             "heading": "LED colors",
             "body": [
-                "Step pads: white=note, red=accent, blue=slide, off=rest.",
-                "Current step blinks yellow as playback moves through the pattern.",
-                "Bank row: purple = current bank, grey = other banks.",
-                "Action row: teal=New, indigo=Mutate, orange=Dir, pink=Clear, red=Stop, green=Play."
+                "Steps:   white=note, red=accent, blue=slide, off=rest.",
+                "Cursor:  current step blinks yellow.",
+                "Banks:   purple=current, teal=filled, off=empty.",
+                "         Yellow flash = bank queued for next-bar recall.",
+                "         Shift held: row pulses red/pink (save targets).",
+                "Actions: teal NEW, indigo MUT, orange DIR.",
+                "Pages:   green=current step page, white=available.",
+                "Tracks:  bright teal=active 3PO, bright orange=active 303."
             ]
         },
         {
             "heading": "Suspend & exit",
             "body": [
-                "Back            hide TB-3PO and keep sequencing in the background.",
+                "Back            hide TB-3PO and keep both slots",
+                "                sequencing in the background.",
                 "Shift+Back      fully exit (release notes, unload).",
                 "Shift+Vol+Back  also suspend (host-level escape).",
                 "Shift+Vol+Jog   also full exit.",
-                "Re-open from the Tools menu → resume with pattern + position intact."
+                "Re-open from Tools → resumes with patterns + position",
+                "intact for both slots."
             ]
         },
         {
             "heading": "Sync",
             "body": [
                 "Tempo follows Move's project BPM automatically.",
-                "TB-3PO runs free (not gated by Move's transport) — use the Play/Stop",
-                "pads to start/stop."
+                "TB-3PO runs free (not gated by Move's transport) —",
+                "use the Play button to start/stop."
+            ]
+        },
+        {
+            "heading": "Credits",
+            "body": [
+                "Algorithm: djphazer / Hemisphere Suite (TB_3PO applet)",
+                "Schwung port: Charles Vestal — GPL-3.0"
             ]
         }
     ]
