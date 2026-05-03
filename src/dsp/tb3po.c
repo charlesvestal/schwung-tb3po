@@ -113,7 +113,7 @@ typedef struct tb3po_inst {
     int poll_counter;
     float host_bpm;
     int host_clock_status;
-    int prev_clock_status;
+    int clock_stable_count;   /* consecutive identical get_clock_status reads — debounce for recovery poll */
     int follow_transport;   /* 1 = start/stop with Move's transport; 0 = free run */
 
     /* MIDI-clock pulse sync: when the shim delivers 0xF8 pulses, we advance on
@@ -643,13 +643,22 @@ static void *tb3po_create(const char *module_dir, const char *json_defaults) {
     /* Don't self-play on load. Wait for 0xFA/0xFB from the host transport,
      * or mark as running if transport is already playing when we come up. */
     t->running = 0;
+    int clock_at_create = MOVE_CLOCK_STATUS_UNAVAILABLE;
     if (t->host && t->host->get_clock_status) {
-        if (t->host->get_clock_status() == MOVE_CLOCK_STATUS_RUNNING) {
+        clock_at_create = t->host->get_clock_status();
+        if (clock_at_create == MOVE_CLOCK_STATUS_RUNNING) {
             t->running = 1;
         }
     }
     t->follow_transport = 1;  /* default: follow Move's transport */
-    t->prev_clock_status = MOVE_CLOCK_STATUS_UNAVAILABLE;
+    t->clock_stable_count = 0;
+    if (t->host && t->host->log) {
+        char m[96];
+        snprintf(m, sizeof(m),
+                 "[tb3po] create: running=%d follow_transport=%d clock_status=%d",
+                 t->running, t->follow_transport, clock_at_create);
+        t->host->log(m);
+    }
 
     /* Restore persisted state before generating a pattern — if we load a
      * pattern from disk we don't want to overwrite it with a fresh random one.
@@ -987,10 +996,48 @@ static void tb3po_render_block(void *inst, int16_t *out_lr, int frames) {
         }
     }
 
-    /* (Transport follow is now driven purely by the explicit 0xFA/0xFB/0xFC
-     * messages delivered by the shim in on_midi — no polling get_clock_status,
-     * which raced with the MIDI path and caused the "sometimes stops / sometimes
-     * restarts" glitches.) */
+    /* === Transport-state debounced recovery poll =========================
+     * Primary transport follow is driven by 0xFA/0xFB/0xFC in on_midi.
+     * Polling get_clock_status raced with the MIDI path historically — to
+     * avoid that race we only act on N consecutive identical reads, and
+     * never override mid-stream: we only recover when the host's view and
+     * our running flag have disagreed for the full debounce window. This
+     * catches missed transport bytes (e.g. shim cable forwarding gaps)
+     * without re-introducing the flap. */
+    if (t->follow_transport && t->host && t->host->get_clock_status &&
+        ((t->poll_counter & 0x07) == 0)) {
+        int cs = t->host->get_clock_status();
+        if (cs == t->host_clock_status) {
+            if (t->clock_stable_count < 32) t->clock_stable_count++;
+        } else {
+            t->host_clock_status = cs;
+            t->clock_stable_count = 1;
+        }
+        /* ~8 polls × ~2.9 ms × 8 (mask 0x07) ≈ 185 ms debounce. */
+        if (t->clock_stable_count >= 8) {
+            if (cs == MOVE_CLOCK_STATUS_RUNNING && !t->running) {
+                t->running = 1;
+                for (int i = 0; i < NUM_SLOTS; i++) {
+                    t->slots[i].position = t->slots[i].length - 1;
+                }
+                t->clock_pulses = 5;
+                t->sample_accum = 0;
+                if (t->host->log) t->host->log("[tb3po] poll-recovered: running=1 (host=RUNNING)");
+            } else if (cs == MOVE_CLOCK_STATUS_STOPPED && t->running) {
+                t->running = 0;
+                for (int i = 0; i < NUM_SLOTS; i++) {
+                    tb3po_slot_t *s = &t->slots[i];
+                    kill_last_note(t, s);
+                    if (s->portamento_on) {
+                        uint8_t ch = (uint8_t)((s->channel - 1) & 0x0F);
+                        send_midi(t, 0xB0 | ch, 65, 0);
+                        s->portamento_on = 0;
+                    }
+                }
+                if (t->host->log) t->host->log("[tb3po] poll-recovered: running=0 (host=STOPPED)");
+            }
+        }
+    }
 
     if (!t->running) return;
 
