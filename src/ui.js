@@ -7,6 +7,10 @@ import {
     setLED as sharedSetLED, setButtonLED as sharedSetButtonLED
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 import { createValue, createEnum } from '/data/UserData/schwung/shared/menu_items.mjs';
+import {
+    knobInit, knobTick,
+    KNOB_TYPE_FLOAT, KNOB_TYPE_INT, KNOB_TYPE_ENUM
+} from '/data/UserData/schwung/shared/knob_engine.mjs';
 
 //
 // Knobs (CC 71-78, relative encoders) edit params. Pads are arranged 4x8
@@ -136,9 +140,30 @@ function clampStepView()  { const m = stepPageCount() - 1; if (cur().stepView > 
 // (bpm, running, sync_source, etc.) stay bare.
 function slotKey(k) { return (ui.activeSlot === 0 ? "a." : "b.") + k; }
 
+// DEBUG: detect the "shim miss" failure where host_module_set_param /
+// host_module_get_param have been deleted out from under us by a wrong
+// suspend/teardown branch in shadow_ui.js while suspend_keeps_js keeps
+// tick() firing. Without this log, every set/get becomes a silent no-op
+// and the UI looks "disconnected from the DSP".
+// Confirmed root cause 2026-04-29; if SHIM MISS fires, check
+// schwung/src/shadow/shadow_ui.js exitToolOvertake + TOOLS flag handler
+// for the suspendedOvertakes eviction fix.
+let __shimMissCount = 0;
+let __shimMissLastLogged = {};
+function __logShimMiss(kind, key) {
+    __shimMissCount++;
+    const now = Date.now();
+    const tag = kind + ":" + key;
+    if ((now - (__shimMissLastLogged[tag] || 0)) < 2000) return;
+    __shimMissLastLogged[tag] = now;
+    console.log("[tb3po] SHIM MISS " + kind + " key=" + key + " count=" + __shimMissCount);
+}
+
 function setDspParam(key, val) {
     if (typeof host_module_set_param === "function") {
         host_module_set_param(key, String(val));
+    } else {
+        __logShimMiss("set", key);
     }
 }
 
@@ -146,6 +171,7 @@ function getDspParam(key) {
     if (typeof host_module_get_param === "function") {
         return host_module_get_param(key);
     }
+    __logShimMiss("get", key);
     return null;
 }
 
@@ -162,9 +188,23 @@ function parsePattern(s) {
     }
 }
 
+let __dspNullStreak = 0;
 function pollDsp() {
     const pos = getDspParam(slotKey("position"));
-    if (pos !== null && pos !== "") cur().position = parseInt(pos, 10) | 0;
+    if (pos !== null && pos !== "") {
+        if (__dspNullStreak >= 50) {
+            console.log("[tb3po] DSP READ RECOVERED after " + __dspNullStreak + " null reads");
+        }
+        __dspNullStreak = 0;
+        cur().position = parseInt(pos, 10) | 0;
+    } else {
+        __dspNullStreak++;
+        if (__dspNullStreak === 50 || __dspNullStreak === 500 ||
+            (__dspNullStreak > 500 && (__dspNullStreak % 5000) === 0)) {
+            console.log("[tb3po] DSP READ STUCK streak=" + __dspNullStreak +
+                        " activeSlot=" + ui.activeSlot + " shimMiss=" + __shimMissCount);
+        }
+    }
     if ((pollTick % 10) === 0) {
         parsePattern(getDspParam(slotKey("pattern")));
         const bank = getDspParam(slotKey("current_bank"));
@@ -203,74 +243,66 @@ function pollDsp() {
 // -------- Knob handling ----------
 
 // Shadow UI batches encoder ticks per frame (~22ms) and encodes the
-// accumulated count as the CC value (CW = 1..63, CCW = 65..127). That
-// accumulated count is already speed-proportional — turning faster
-// delivers a bigger count per frame. So we use the raw signed count
-// directly and scale it by a per-context gain constant below; running
-// it through decodeAcceleratedDelta() on top double-counted speed and
-// felt twitchy.
+// accumulated count as the CC value (CW = 1..63, CCW = 65..127). The
+// per-frame batched count is fed as `direction` to knob_engine, which
+// applies the unified divisor curve (fine when slow, accumulating when
+// fast) and the 10-tick-per-option enum budget shared with schwung.
 function decodeDelta(value) {
     if (value === 0 || value === 64) return 0;
     if (value <= 63) return value;
     return -(128 - value);
 }
 
-// Global knob-gain factors — raise to sweep faster, lower for fine.
-// 3PO param knobs (density/accent/slide/octaves on page, root/scale/
-// length/gate on scale page). 1.0 = each encoder tick ≈ one unit.
-const KNOB_GAIN_3PO = 1.0;
-// 303 mode: each encoder tick nudges the CC by this many units. 303
-// params read 0–127 so we want a slightly coarser sweep than 3PO.
-const KNOB_GAIN_303 = 1.5;
-// Jog while in value-edit mode (MUTATION/SCALE/CHANNEL pages).
-const JOG_EDIT_GAIN = 1.0;
-
-function scaleDelta(raw, gain) {
-    if (raw === 0 || gain === 0) return 0;
-    const scaled = raw * gain;
-    // Preserve at least one unit of motion so a slow turn still registers.
-    if (scaled > 0 && scaled < 1) return 1;
-    if (scaled < 0 && scaled > -1) return -1;
-    return Math.round(scaled);
-}
-
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Per-key knob_engine state. Keyed by uiKey (per-slot would multiply state
+// for a feature nobody asks for; the slot's current value is re-synced into
+// the engine on every tick anyway).
+const knobStates = new Map();
+function getKnobState(key, currentValue) {
+    let st = knobStates.get(key);
+    if (!st) {
+        st = knobInit(currentValue);
+        knobStates.set(key, st);
+    } else {
+        st.value = currentValue;
+    }
+    return st;
+}
 
 function adjustFloat(key, uiKey, delta, step, lo, hi) {
     const slot = cur();
-    const next = clamp(slot[uiKey] + delta * step, lo, hi);
+    const st = getKnobState(uiKey, slot[uiKey]);
+    const cfg = { type: KNOB_TYPE_FLOAT, min: lo, max: hi, step };
+    const next = knobTick(st, cfg, delta, Date.now());
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
         setDspParam(slotKey(key), next.toFixed(3));
     }
 }
 
-// Detent-step accumulator: small, discrete-set params (enums, short int
-// ranges) should take several encoder clicks to advance one step so
-// they don't whip through values. Drain `delta` into an accumulator
-// and return whole steps when the threshold is crossed.
-const DETENTS_PER_STEP = 4;
-const detentAccum = {};  // keyed by uiKey
-
-function consumeDetents(uiKey, delta) {
-    if (delta === 0) return 0;
-    const acc = (detentAccum[uiKey] || 0) + delta;
-    const steps = (acc > 0)
-        ? Math.floor(acc / DETENTS_PER_STEP)
-        : -Math.floor(-acc / DETENTS_PER_STEP);
-    detentAccum[uiKey] = acc - steps * DETENTS_PER_STEP;
-    return steps;
-}
-
-function resetDetents(uiKey) {
-    detentAccum[uiKey] = 0;
-}
-
 function adjustInt(key, uiKey, delta, lo, hi) {
-    const steps = consumeDetents(uiKey, delta);
-    if (steps === 0) return;
     const slot = cur();
-    const next = clamp((slot[uiKey] | 0) + steps, lo, hi);
+    const st = getKnobState(uiKey, slot[uiKey] | 0);
+    const cfg = { type: KNOB_TYPE_INT, min: lo, max: hi, step: 1 };
+    const next = knobTick(st, cfg, delta, Date.now());
+    if (next !== slot[uiKey]) {
+        slot[uiKey] = next;
+        setDspParam(slotKey(key), String(next));
+    }
+}
+
+/* Tiny int ranges (e.g. octaves 1..3) feel like enums — route them through
+ * the engine's enum branch so each option needs the full enum tick budget
+ * instead of the int divisor. */
+function adjustIntAsEnum(key, uiKey, delta, lo, hi) {
+    const slot = cur();
+    const count = hi - lo + 1;
+    const curIdx = clamp((slot[uiKey] | 0) - lo, 0, count - 1);
+    const st = getKnobState(uiKey, curIdx);
+    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: count - 1, step: 1, enumCount: count };
+    const nextIdx = knobTick(st, cfg, delta, Date.now());
+    const next = nextIdx + lo;
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
         setDspParam(slotKey(key), String(next));
@@ -278,10 +310,10 @@ function adjustInt(key, uiKey, delta, lo, hi) {
 }
 
 function adjustEnum(key, uiKey, delta, count) {
-    const steps = consumeDetents(uiKey, delta);
-    if (steps === 0) return;
     const slot = cur();
-    const next = ((slot[uiKey] | 0) + steps + count * 100) % count;
+    const st = getKnobState(uiKey, slot[uiKey] | 0);
+    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: count - 1, step: 1, enumCount: count };
+    const next = knobTick(st, cfg, delta, Date.now());
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
         setDspParam(slotKey(key), String(next));
@@ -289,12 +321,13 @@ function adjustEnum(key, uiKey, delta, count) {
 }
 
 function adjustLength(delta) {
-    const steps = consumeDetents("length", delta);
-    if (steps === 0) return;
     const slot = cur();
     const idx = LENGTHS.indexOf(slot.length);
     const curIdx = idx < 0 ? 1 : idx;
-    const next = LENGTHS[clamp(curIdx + steps, 0, LENGTHS.length - 1)];
+    const st = getKnobState("length", curIdx);
+    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: LENGTHS.length - 1, step: 1, enumCount: LENGTHS.length };
+    const nextIdx = knobTick(st, cfg, delta, Date.now());
+    const next = LENGTHS[nextIdx];
     if (next !== slot.length) {
         slot.length = next;
         setDspParam(slotKey("length"), String(next));
@@ -378,17 +411,22 @@ function currentPageItems() {
     return null;
 }
 
+/* Jog wheel: each detent = one step. No acceleration, no enum tick budget —
+ * those belong to the encoder knobs (which deliver many counts per turn);
+ * the jog wheel already emits one discrete click per detent. */
 function adjustMenuItem(item, delta) {
     if (!item || delta === 0 || !item.set || !item.get) return;
+    const step = delta > 0 ? 1 : -1;
     const curVal = item.get();
     if (item.type === "value") {
-        const next = clamp(curVal + delta, item.min, item.max);
+        const next = clamp(curVal + step, item.min, item.max);
         if (next !== curVal) item.set(next);
     } else if (item.type === "enum") {
         const opts = item.options || [];
         if (opts.length === 0) return;
         const idx = opts.indexOf(curVal);
-        const newIdx = ((idx < 0 ? 0 : idx) + delta + opts.length * 100) % opts.length;
+        const startIdx = idx < 0 ? 0 : idx;
+        const newIdx = clamp(startIdx + step, 0, opts.length - 1);
         const next = opts[newIdx];
         if (next !== curVal) item.set(next);
     }
@@ -464,7 +502,7 @@ function handleKnob(knobIdx, delta) {
             case 0: adjustFloat("density", "density", delta, 0.01, 0, 1); patternStale = true; break;
             case 1: adjustFloat("accent",  "accent",  delta, 0.01, 0, 1); patternStale = true; break;
             case 2: adjustFloat("slide",   "slide",   delta, 0.01, 0, 1); patternStale = true; break;
-            case 3: adjustInt  ("octaves", "octaves", delta, 1, 3);       patternStale = true; break;
+            case 3: adjustIntAsEnum("octaves", "octaves", delta, 1, 3);   patternStale = true; break;
             // Playback knobs — affect emission immediately without regenerating.
             case 4: adjustEnum("root",     "root",    delta, 12); break;
             case 5: adjustEnum("scale",    "scale",   delta, SCALE_NAMES.length); break;
@@ -521,8 +559,11 @@ function send303Cc(knobIdx, delta) {
     const cc = CC_303[knobIdx];
     if (cc === undefined || delta === 0) return;
     const slot = cur();
-    const next = clamp((slot.cc303[knobIdx] | 0) + delta, 0, 127);
-    if (next === slot.cc303[knobIdx]) return;
+    const cur303 = slot.cc303[knobIdx] | 0;
+    const st = getKnobState("303:" + knobIdx, cur303);
+    const cfg = { type: KNOB_TYPE_INT, min: 0, max: 127, step: 1 };
+    const next = knobTick(st, cfg, delta, Date.now());
+    if (next === cur303) return;
     slot.cc303[knobIdx] = next;
     if (typeof shadow_send_midi_to_dsp === "function") {
         const chStatus = 0xB0 | ((slot.channel - 1) & 0x0F);
@@ -1047,9 +1088,7 @@ globalThis.onMidiMessageInternal = function(data) {
     // Knob deltas arrive as synthetic CC messages (CC 71-78).
     if (type === 0xB0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
         const knobIdx = d1 - CC_KNOB_BASE;
-        const raw = decodeDelta(d2);
-        const gain = (cur().mode === MODE_303) ? KNOB_GAIN_303 : KNOB_GAIN_3PO;
-        handleKnob(knobIdx, scaleDelta(raw, gain));
+        handleKnob(knobIdx, decodeDelta(d2));
         return;
     }
 
@@ -1065,10 +1104,8 @@ globalThis.onMidiMessageInternal = function(data) {
         const state = cur().menuState[currentPage];
         if (!state) return;
         // Nav mode: 1 detent = 1 row (no acceleration, prevents overshoot on
-        // short lists). Edit mode: gain-scaled so fast spins sweep quickly.
-        const raw = decodeDelta(d2);
-        const delta = state.editing ? scaleDelta(raw, JOG_EDIT_GAIN) : raw;
-        handleJogTurn(delta);
+        // short lists). Edit mode: passes raw count to knob_engine.
+        handleJogTurn(decodeDelta(d2));
         return;
     }
 
