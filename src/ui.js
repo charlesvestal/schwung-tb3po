@@ -224,6 +224,16 @@ function pollDsp() {
         }
         const ss = getDspParam("sync_source");
         if (ss === "EXT" || ss === "INT") ui.syncSource = ss;
+        // Re-assert per-slot output channel to the DSP. The UI owns this
+        // setting, but init() only runs on first load — on resume the overtake
+        // DSP can be reloaded (single-tenant slot 0) and come back on a stale
+        // channel without init re-running, silently routing notes to a channel
+        // no synth is listening on. Re-pushing here keeps the DSP on the
+        // channel the UI shows through load, resume, and DSP reloads. The DSP's
+        // "channel" set_param is side-effect-free, so re-asserting an unchanged
+        // value is a harmless no-op.
+        setDspParam("a.channel", String(ui.slots[0].channel));
+        setDspParam("b.channel", String(ui.slots[1].channel));
     }
 
     // Re-scan for a 303 slot every ~1.4 sec so Track 2 / 303-mode UX reflects
@@ -980,6 +990,17 @@ function draw() {
 
 globalThis.init = function() {
     console.log("[tb3po] ui init");
+    // Reconcile the per-slot output channel down to the DSP on load.
+    // The UI owns the channel setting but, until now, only pushed it to the
+    // DSP from the channel-edit handler — never on init/resume. The DSP boots
+    // (or restores) on its own channel, so on load it could emit on a channel
+    // that no synth is listening to: notes route nowhere and the slot synth
+    // stays silent, even though the UI shows the "right" channel. The only
+    // thing that fixed it was nudging the channel (which calls setDspParam).
+    // Assert both slots' channels here so the DSP matches what the UI shows
+    // from the first frame — same effect as the manual nudge, automatically.
+    setDspParam("a.channel", String(ui.slots[0].channel));
+    setDspParam("b.channel", String(ui.slots[1].channel));
     // First-load nudge — call out the four-button slot/mode scheme so the
     // user understands two slots (A/B) run in parallel on separate channels.
     showOverlay("Slots A+B", "T1/T2 A, T3/T4 B", 360);
