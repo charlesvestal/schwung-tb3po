@@ -82,8 +82,57 @@ export async function main(cases) {
     return failures;
 }
 
-/* No cases yet — Task 6 supplies them. */
+const { drawPage } = await import("../src/pages.mjs");
+const { ringFor } = await import("../src/params.mjs");
+const { REST, NOTE, ACCENT, SLIDE } = await import("../src/lane.mjs");
+
+const VIEW = {
+    slotLabel: "Slot A", bpm: 124, shiftHeld: false, touched: -1,
+    steps: [ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
+            REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT],
+    position: 6, stepView: 0,
+    values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
+              root: 9, scale: 0, length: 1, octaves: 2,
+              "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
+              "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
+              channel: 1, direction: 0, transpose: 0, current_bank: 3 },
+};
+
+const ring = ringFor({ has303: true });
+const cases = ring.map((page, i) =>
+    [page.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+     (fb, ctx) => drawPage(fb, ctx, { ...VIEW, ring, pageIndex: i })]);
+
+/* The states a static walk of the ring cannot reach. */
+cases.push(["pads-shift", (fb, ctx) =>
+    drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 4, shiftHeld: true })]);
+cases.push(["pattern-touched", (fb, ctx) =>
+    drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 1, touched: 1 })]);
+/* And the ring one page short, which is what no 303 loaded looks like. */
+const short = ringFor({ has303: false });
+cases.push(["no-303-ring", (fb, ctx) =>
+    drawPage(fb, ctx, { ...VIEW, ring: short, pageIndex: 0 })]);
+
+/*
+ * The window work landed after the plan's case list was written: a 32-step
+ * pattern has a second 16-step window, on both the big lane (PERFORM, follows
+ * the user's stepView) and the mini lane (Pattern's footer, follows the
+ * playhead — see windowFor in lane.mjs). position: 20 sits inside window 1
+ * (steps 17-32) on the mini lane, independent of stepView.
+ */
+const STEPS32 = [
+    ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
+    REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT,
+    NOTE, REST, SLIDE, NOTE, ACCENT, REST, NOTE, NOTE,
+    REST, ACCENT, NOTE, SLIDE, NOTE, REST, NOTE, ACCENT,
+];
+const VIEW32 = { ...VIEW, steps: STEPS32, values: { ...VIEW.values, length: 3 } };
+cases.push(["perform-window2", (fb, ctx) =>
+    drawPage(fb, ctx, { ...VIEW32, ring, pageIndex: 0, stepView: 1, position: 20 })]);
+cases.push(["pattern-window2", (fb, ctx) =>
+    drawPage(fb, ctx, { ...VIEW32, ring, pageIndex: 1, position: 20 })]);
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-    const failCount = await main([]);
+    const failCount = await main(cases);
     if (failCount) process.exit(1);
 }
