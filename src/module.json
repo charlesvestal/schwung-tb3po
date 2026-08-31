@@ -15,6 +15,8 @@
         "midi_out": true,
         "suspend_keeps_js": true,
         "suspend_self_managed": true,
-        "button_passthrough": [85]
+        "button_passthrough": [
+            85
+        ]
     }
 }
