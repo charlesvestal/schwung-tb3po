@@ -254,11 +254,19 @@
         "project BPM by",
         "itself.",
         "",
-        "TB-3PO runs free - it",
-        "is not gated by",
-        "Move's transport, so",
-        "use the Play button",
-        "to start and stop it."
+        "TB-3PO follows Move's",
+        "transport. Start",
+        "rewinds both slots to",
+        "step 1, Continue",
+        "resumes in place, and",
+        "Stop stops them and",
+        "releases held notes.",
+        "",
+        "If a transport byte",
+        "is missed, it",
+        "re-syncs from the",
+        "host after about",
+        "200 ms."
       ]
     },
     {
