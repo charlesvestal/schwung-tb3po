@@ -9,6 +9,27 @@
 
 export const REST = 0, NOTE = 1, ACCENT = 2, SLIDE = 3;
 
+/*
+ * Both lanes draw a 16-step WINDOW, because a pattern is 8, 16, 24 or 32 steps
+ * and the screen is 128px wide.
+ *
+ * The two lanes pick their window differently, and the asymmetry is the point:
+ *
+ *   The BIG lane is something you EDIT. The pads write into the window on
+ *   screen, so it must be the window the user chose with the < > buttons --
+ *   auto-scrolling it would move the target out from under their hands.
+ *
+ *   The MINI lane is something you WATCH. It is ambient, has no interaction,
+ *   and no room to say which window it is showing, so it always follows the
+ *   playhead.
+ *
+ * An earlier draft of this file hard-coded steps 0..15 in both, which silently
+ * dropped the back half of every 24- and 32-step pattern and lost the playhead
+ * entirely once it passed step 15 -- while the Keys page still advertised
+ * "< >  STEP PG".
+ */
+export function windowFor(position) { return Math.floor((position | 0) / 16) * 16; }
+
 /* A slide is a note that ties into the next step, so it stands as tall as a
  * plain note. */
 function isRest(s) { return s === REST; }
@@ -31,19 +52,24 @@ function miniTop(y, h, s) {
  */
 export function drawMiniLane(fb, ctx, state, rect) {
     const { x, y, w, h } = rect;
-    const steps = state.steps;
+    const base = state.stepBase | 0;
+    /* `?? REST` rather than a bare index: a window running past the end of a
+     * short pattern must read as empty, and an undefined entry falls through
+     * both isRest and isAccent into the note branch, i.e. it would draw as a
+     * lit bar. */
+    const at = (i) => state.steps[base + i] ?? REST;
     const cw = w / 16;
     /* `heightOf` lets a test pin a slide's height without inventing a fifth
      * step state; in production a slide is always note-height. */
     const heightState = (i) =>
-        state.heightOf ? state.heightOf(i) : (steps[i] === SLIDE ? NOTE : steps[i]);
+        state.heightOf ? state.heightOf(i) : (at(i) === SLIDE ? NOTE : at(i));
 
     for (let i = 0; i < 16; i++) {
         const cx = Math.round(x + i * cw), nx = Math.round(x + (i + 1) * cw);
         const bw = Math.max(1, nx - cx - 1);
-        const s = steps[i];
+        const s = at(i);
 
-        if (i === state.position) {
+        if (base + i === state.position) {
             /* Full height, because the playhead is the one mark that has to
              * survive the compression whatever the step under it is. */
             ctx.fillRect(cx, y, bw, h, 1);
@@ -75,15 +101,16 @@ export function drawMiniLane(fb, ctx, state, rect) {
 /**
  * The full-size lane. Baseline across the rect, 8px per step.
  *
- * @param {object} rect { x, y, w, h } — h must be at least 22.
+ * @param {object} rect { x, y, w, h } — h must be at least 19.
  */
 export function drawBigLane(fb, ctx, state, rect) {
-    const steps = state.steps;
+    const stepBase = state.stepBase | 0;
+    const at = (i) => state.steps[stepBase + i] ?? REST;
     const base = rect.y + rect.h - 6;
     ctx.fillRect(rect.x, base, rect.w, 1, 1);
 
     for (let i = 0; i < 16; i++) {
-        const x = rect.x + i * 8, s = steps[i];
+        const x = rect.x + i * 8, s = at(i);
         if (isRest(s)) continue;
         const bh = isAccent(s) ? 13 : 8;
         ctx.fillRect(x + 2, base - bh, 5, bh, 1);
@@ -94,5 +121,7 @@ export function drawBigLane(fb, ctx, state, rect) {
     for (let i = 0; i <= 16; i += 4) {
         ctx.fillRect(Math.min(rect.x + i * 8, rect.x + rect.w - 1), base + 1, 1, 3, 1);
     }
-    ctx.fillRect(rect.x + state.position * 8 + 1, base + 2, 7, 2, 1);
+    /* Only when the playhead is inside the window being shown. */
+    const pcol = (state.position | 0) - stepBase;
+    if (pcol >= 0 && pcol < 16) ctx.fillRect(rect.x + pcol * 8 + 1, base + 2, 7, 2, 1);
 }
