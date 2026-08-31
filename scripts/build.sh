@@ -47,7 +47,18 @@ echo "Compiling DSP..."
 cat build/dsp.so > "$DIST_DIR/dsp.so"
 chmod 0755 "$DIST_DIR/dsp.so"
 cat src/module.json > "$DIST_DIR/module.json"
-cat src/ui.js > "$DIST_DIR/ui.js"
+
+# ui.js plus its sibling ES modules. A missed file here fails at IMPORT time
+# on the device, i.e. a module that installs cleanly and then does not load —
+# which is exactly how v0.2.7 happened.
+for f in ui.js params.mjs lane.mjs pad_map.mjs pages.mjs; do
+    if [ ! -f "src/$f" ]; then
+        echo "ERROR: src/$f not found -- aborting build (would ship a module that fails to import)" >&2
+        exit 1
+    fi
+    cat "src/$f" > "$DIST_DIR/$f"
+done
+
 [ -f src/help.json ] && cat src/help.json > "$DIST_DIR/help.json" || true
 
 (cd dist && tar -czf "${MODULE_ID}-module.tar.gz" "${MODULE_ID}/")
