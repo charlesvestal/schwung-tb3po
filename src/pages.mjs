@@ -32,7 +32,7 @@ function common(view) {
 /**
  * @param {object} view
  *   slotLabel, bpm, ring, pageIndex, steps, position, values, touched,
- *   shiftHeld
+ *   shiftHeld, diveHint
  */
 export function drawPage(fb, ctx, view) {
     const page = view.ring[view.pageIndex];
@@ -104,6 +104,23 @@ export function drawPage(fb, ctx, view) {
  * for an ambient lane on a page nobody performs from is the wrong way round.
  */
 function drawFooterLane(fb, ctx, view) {
+    /*
+     * A DIVABLE CELL IS ANNOUNCED IN THE FOOTER, and it costs the lane.
+     *
+     * Nothing on the cell says a click will open it -- corner brackets and the
+     * chevron box mark other things, and 953 of the fleet's 967 divable cells
+     * wear no mark at all -- so the footer is where the promise has to live,
+     * and it is `CLK OPEN`, the same pair the shared grid's held-knob branch
+     * puts there. Two pairs need the width the mini lane is using, and the lane
+     * is ambient: it is worth reading when your hands are off the knobs, which
+     * is precisely when this hint is absent. So they take turns rather than
+     * fighting over 82 pixels, and the swap only happens while a divable knob
+     * is actually held.
+     */
+    if (view.diveHint) {
+        drawFooter(ctx, [["JOG", "PAGE"], ["CLK", "OPEN"]]);
+        return;
+    }
     drawFooter(ctx, [["JOG", "PAGE"]]);
     ctx.fillRect(46, 56, 82, 8, 0);
     /* The window the MUSIC is in, because nothing here is editable and there

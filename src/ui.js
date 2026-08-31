@@ -10,7 +10,8 @@ import {
     knobInit, knobStep,
     KNOB_TYPE_FLOAT, KNOB_TYPE_INT, KNOB_TYPE_ENUM
 } from '/data/UserData/schwung/shared/knob_engine.mjs';
-import { isReadOnly } from '/data/UserData/schwung/shared/param_pages/param_meta.mjs';
+import { isReadOnly, isDivable } from '/data/UserData/schwung/shared/param_pages/param_meta.mjs';
+import { drawEnumList } from '/data/UserData/schwung/shared/param_pages/enum_list.mjs';
 import { drawPage, META } from './pages.mjs';
 /* ROOT_NAMES and SCALE_NAMES are no longer imported: the grid formats
  * an enum from its DECLARED options, so the names live in one place. */
@@ -35,6 +36,18 @@ const NUM_STEP_BUTTONS = 16;
 const CC_KNOB_BASE = 71;        // CCs 71..78 = knobs 1..8
 const CC_SHIFT = 49;
 const CC_BACK = 51;
+/*
+ * Jog click.
+ *
+ * It was unhandled, on the note that it belonged to "the host's exit combo" --
+ * but that combo is Shift+Vol+JogClick, and shadow_ui.js only claims the click
+ * when BOTH modifiers are down (the `hostShiftHeld && hostVolumeKnobTouched`
+ * test above its forward to onMidiMessageInternal). A PLAIN click is not
+ * accumulated like the knobs and jog turn are, and falls straight through to
+ * us. So the free gesture the shared UI spends on "dive into the cell under
+ * your hand" is free here too.
+ */
+const CC_JOG_CLICK = 3;
 const CC_DELETE = 119;          // Move's X / Delete button
 const CC_DOWN = 54;             // Move's - button (octave down)
 const CC_UP = 55;               // Move's + button (octave up)
@@ -350,6 +363,30 @@ function adjustLength(delta) {
     }
 }
 
+/*
+ * `channel` is an enum of INDICES to the grid and a channel NUMBER everywhere
+ * else -- the DSP, the Ch-/Ch+ action pads, and send303Cc's status byte. This
+ * is the only place that projection lives on the write side, exactly as
+ * adjustLength is for `length`; dspValues is its inverse.
+ *
+ * The engine state is keyed "channel:idx" rather than "channel" ON PURPOSE:
+ * the action pads still drive adjustInt("channel", "channel", ...) in CHANNEL
+ * space, and knob_engine's detent accumulator is per-key. Sharing one key
+ * would mean two callers banking partial turns into the same accumulator in
+ * two different units.
+ */
+function adjustChannel(delta) {
+    const slot = cur();
+    const curIdx = clamp((slot.channel | 0) - 1, 0, 15);
+    const st = getKnobState("channel:idx", curIdx);
+    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: 15, step: 1, enumCount: 16 };
+    const next = knobStep(st, cfg, delta, Date.now()) + 1;
+    if (next !== slot.channel) {
+        slot.channel = next;
+        setDspParam(slotKey("channel"), String(next));
+    }
+}
+
 let patternStale = false;  // true when prob-knobs have changed since last generate
 
 /*
@@ -427,6 +464,8 @@ function editKey(key, delta) {
     /* `length` is an enum of INDICES to the grid and a step COUNT to the DSP;
      * adjustLength is the only place that projection lives. */
     if (key === "length") { adjustLength(delta); return; }
+    /* ...and so is `channel`, since it became an enum to earn the picker. */
+    if (key === "channel") { adjustChannel(delta); return; }
     const field = KEY_FIELD[key];
     if (!field) return;
     const meta = META.getOrGuess(key);
@@ -470,6 +509,111 @@ function handleKnob(knobIdx, delta) {
         editKey(key, delta);
         if (STALE_KEYS.has(key)) patternStale = true;
     }
+}
+
+/* ===================== THE ENUM OPTION PICKER =====================
+ *
+ * Touch a knob, click the jog: the cell under your hand opens as a list. That
+ * is the shared UI's gesture for a divable cell, and a CHAIN COMPONENT gets it
+ * for free from the grid controller. TB-3PO is a TOOL -- it owns its own MIDI
+ * dispatch and its own draw -- so it gets none of it, and the list it opens has
+ * to be the SAME list, not a second one. Hence drawEnumList rather than a local
+ * drawMenuList call: "a second list widget is how Master FX and the chain
+ * editor drifted apart".
+ *
+ * WHAT IS DIFFERENT HERE, and it is not a design choice: THERE IS NO CANCEL.
+ *
+ * shadow_ui.js claims a plain Back press for every `suspend_keeps_js` overtake
+ * module (this one) and turns it into suspendOvertakeMode() BEFORE the forward
+ * to onMidiMessageInternal -- the module only ever sees the RELEASE edge, which
+ * is why the CC_BACK case below has always been a comment and a `return`. So a
+ * Back that cancelled the picker would be a Back that also parked the tool, and
+ * inventing some other cancel key would be a gesture fighting the host for no
+ * gain. A second jog click commits; nothing cancels. The footer says exactly
+ * that (JOG SEL / CLK SET) and never advertises a BACK EXIT it cannot honour.
+ *
+ * Nothing is written while you scroll -- the commit is one setKeyIndex at
+ * close -- so the `*` mark still means "the value that is live", and moving off
+ * it still reads as having moved off it.
+ */
+let picker = null;
+
+function pickerIsOpen() { return picker !== null; }
+
+/*
+ * Write an option INDEX to a key.
+ *
+ * The inverse of dspValues for exactly the keys the grid indexes, which is why
+ * `length` and `channel` are named here as well: the picker commits an index
+ * and the DSP wants a step count and a channel number.
+ */
+function setKeyIndex(key, idx) {
+    const slot = cur();
+    if (key === "length") {
+        const v = LENGTHS[idx];
+        if (v === undefined || v === slot.length) return;
+        slot.length = v;
+        setDspParam(slotKey("length"), String(v));
+        clampStepView();
+        return;
+    }
+    if (key === "channel") {
+        const v = clamp((idx | 0) + 1, 1, 16);
+        if (v === slot.channel) return;
+        slot.channel = v;
+        setDspParam(slotKey("channel"), String(v));
+        return;
+    }
+    const field = KEY_FIELD[key];
+    if (!field) return;
+    if (slot[field] === idx) return;
+    slot[field] = idx;
+    setDspParam(slotKey(key), String(idx));
+    if (STALE_KEYS.has(key)) patternStale = true;
+}
+
+/*
+ * Open the picker on a key, or refuse.
+ *
+ * `isDivable` is the SAME predicate the shared grid uses, rather than a local
+ * "is it an enum" test: a readout (current_bank) and a trigger are excluded
+ * from `divable` by construction, and re-deriving that here is how the two
+ * would come apart. An empty option list is refused for the reason
+ * openEnumPicker refuses one -- a screen with nothing on it and, here, no way
+ * back off it.
+ */
+function openPickerFor(key) {
+    if (!key) return false;
+    const meta = META.getOrGuess(key);
+    if (!isDivable(meta)) return false;
+    const options = Array.isArray(meta.options) ? meta.options.map(String) : [];
+    if (options.length === 0) return false;
+    const live = clamp(dspValues(cur())[key] | 0, 0, options.length - 1);
+    picker = {
+        key: key,
+        title: meta.label || meta.name || key,
+        options: options,
+        index: live,
+        /* The value that is LIVE, i.e. what the `*` marks. */
+        openIndex: live,
+    };
+    return true;
+}
+
+/* ONE DETENT, ONE ROW. The jog delta arriving here is already a physical
+ * detent count (shadow_ui accumulates one CC per detent), so 1:1 is the whole
+ * rule -- no divisor, no acceleration. These lists are 4 and 16 long and
+ * overshooting one is worse than arriving slowly. */
+function pickerJog(delta) {
+    if (!picker || delta === 0) return;
+    picker.index = clamp(picker.index + delta, 0, picker.options.length - 1);
+}
+
+function closePicker(commit) {
+    if (!picker) return;
+    const p = picker;
+    picker = null;
+    if (commit) setKeyIndex(p.key, p.index);
 }
 
 // Slot that currently hosts the 303 plugin. Refreshed on 303-mode entry and
@@ -780,14 +924,42 @@ function draw() {
     clampStepView();
     const fb = { fillRect: fill_rect };
     const ctx = { fillRect: fill_rect, print: print, textWidth: text_width, line: draw_line };
+    /*
+     * The picker OWNS the screen -- not an overlay over the page, because the
+     * page's own knob row is exactly what it has replaced. drawOverlay is
+     * skipped for the same reason knob turns stopped raising one: a box on top
+     * of the thing you are reading.
+     */
+    if (picker) {
+        drawEnumList(ctx, {
+            title: picker.title,
+            /* SELECT, the word the shared picker and the module picker both put
+             * there: the grammar of the band says "a list, pick one" before you
+             * have read the title. */
+            headerRight: "SELECT",
+            options: picker.options,
+            index: picker.index,
+            markIndex: picker.openIndex,
+            /* No BACK EXIT pair -- see the picker's own note. The click is the
+             * only way out and the footer must not promise a second one. */
+            footer: [["JOG", "SEL"], ["CLK", "SET"]],
+        });
+        return;
+    }
     const slot = cur();
     const r = ring();
     const idx = clampPageIndex(ui.activeSlot);
     /* A knob with no key on this page has no cell to strip, and Setup's
      * knobs 5-8 have no key at all -- so the touch is reported only where
      * there is something for it to highlight. */
-    const touched = keyForKnob(touchedKnob) ? touchedKnob : -1;
+    const heldKey = keyForKnob(touchedKnob);
+    const touched = heldKey ? touchedKnob : -1;
     drawPage(fb, ctx, {
+        /* DIVABILITY IS A FOOTER FACT. The cell wears no mark for it -- 953 of
+         * the fleet's 967 divable cells wear none -- so the only honest place
+         * to say the click will open something is the footer, and only while
+         * the knob that would open it is under a hand. */
+        diveHint: !!heldKey && isDivable(META.getOrGuess(heldKey)),
         slotLabel: "Slot " + (ui.activeSlot === 0 ? "A" : "B"),
         bpm: ui.bpm,
         ring: r,
@@ -807,7 +979,12 @@ function draw() {
  * declared keys rather than the grid being taught about slots.
  *
  * `length` is an enum of INDICES to the grid and a step COUNT on the slot, so
- * it is projected back through LENGTHS here -- the inverse of adjustLength. */
+ * it is projected back through LENGTHS here -- the inverse of adjustLength.
+ * `channel` is the same shape for the same reason (it is an enum so that it is
+ * DIVABLE): index here, channel number on the slot -- the inverse of
+ * adjustChannel. Both projections are one line each and both are in this pair
+ * of functions; a third place that guesses is how a knob writes 0.058750 into
+ * an enum. */
 function dspValues(slot) {
     return {
         density: slot.density, accent: slot.accent, slide: slot.slide, gate: slot.gate,
@@ -817,7 +994,8 @@ function dspValues(slot) {
         "303.decay": slot.cc303[2], "303.env_mod": slot.cc303[3],
         "303.accent": slot.cc303[4], "303.volume": slot.cc303[5],
         "303.drive": slot.cc303[6], "303.drive_mix": slot.cc303[7],
-        channel: slot.channel, direction: slot.direction, transpose: slot.transpose,
+        channel: clamp((slot.channel | 0) - 1, 0, 15),
+        direction: slot.direction, transpose: slot.transpose,
         current_bank: slot.currentBank + 1
     };
 }
@@ -878,6 +1056,26 @@ globalThis.onMidiMessageInternal = function(data) {
     }
     if (type === 0xB0 && d1 === CC_BACK) {
         // Host intercepts Back for suspend/exit. Release may leak through; ignore.
+        return;
+    }
+
+    /*
+     * THE PICKER OWNS THE SURFACE, and this must sit ABOVE everything it
+     * suppresses.
+     *
+     * The draw path puts the picker last (it returns before drawPage); the
+     * input path has to feed it first, because every handler below is an
+     * early-out that would consume the event before this test ran. A pad press
+     * or a knob turn landing on the page UNDER the picker is the same class of
+     * bug as a click that acts on a cell the footer was not describing.
+     *
+     * Shift is tracked above this, deliberately: it is state, not an action,
+     * and leaving it stale across a picker would strand the pad rows in save
+     * mode.
+     */
+    if (pickerIsOpen()) {
+        if (type === 0xB0 && d1 === 14) { pickerJog(decodeDelta(d2)); return; }
+        if (type === 0xB0 && d1 === CC_JOG_CLICK && d2 > 0) { closePicker(true); return; }
         return;
     }
 
@@ -951,10 +1149,18 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    // Jog wheel (CC 14) — turns PAGES, on every page. Jog click (CC 3) is
-    // left entirely to the host's exit combo.
+    // Jog wheel (CC 14) — turns PAGES, on every page.
     if (type === 0xB0 && d1 === 14) {
         handleJogTurn(decodeDelta(d2));
+        return;
+    }
+
+    /* Jog click — dive into the cell under your hand, if it has anything to
+     * dive into. Nothing held, or a cell that is not divable, and the click
+     * does nothing at all: it is the shared UI's gesture, so it must not
+     * acquire a second meaning here. */
+    if (type === 0xB0 && d1 === CC_JOG_CLICK && d2 > 0) {
+        openPickerFor(keyForKnob(touchedKnob));
         return;
     }
 
@@ -995,6 +1201,10 @@ globalThis.onUnload = function() {
  */
 export const __test = {
     ui, pageIndex, handleKnob, dspValues, curPage, editKey,
+    /* The picker is module-private state driven entirely through
+     * onMidiMessageInternal; the tests drive the REAL gesture and read the
+     * result here rather than being handed an opener of their own. */
+    picker: () => picker,
     metaFor: (key) => META.getOrGuess(key),
     keyField: (key) => KEY_FIELD[key],
 };

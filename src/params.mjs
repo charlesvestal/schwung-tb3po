@@ -18,6 +18,22 @@ export const ROOT_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A",
 export const SCALE_NAMES = ["Minor", "Phrygian", "HarmMinor", "MinPent", "Dorian", "Major"];
 export const LENGTHS = [8, 16, 24, 32];
 export const DIRECTIONS = ["Fwd", "Rev", "Ping", "Rnd"];
+/*
+ * MIDI channels as an ENUM, for the same reason `length` is one.
+ *
+ * Declared `type: "int"` a channel is turnable but NOT divable — `meta.divable`
+ * is `(opaqueType || listableEnum) && !readOnly && !writeOnly`, and an int is
+ * neither — so the only way to reach channel 14 was to spin a knob through
+ * thirteen values you cannot see ahead of. As an enum it earns the option
+ * picker, and the feel is unchanged: knob_engine gates every enum at
+ * ENUM_DELTA_DIV detents per option, which is exactly what a 1..16 int already
+ * got (NARROW_RANGE_MAX is 16).
+ *
+ * The cost is the same projection `length` already pays: the grid reads and
+ * writes an INDEX, the DSP and the Ch-/Ch+ pads speak channel NUMBERS, and
+ * ui.js is the one place the two are converted (dspValues / adjustChannel).
+ */
+export const CHANNELS = Array.from({ length: 16 }, (_, i) => String(i + 1));
 
 export const TB3PO_PARAMS = [
     { key: "density", label: "Density", short_name: "Dens",  type: "float", min: 0, max: 1, step: 0.01, unit: "%" },
@@ -52,7 +68,7 @@ export const TB3PO_PARAMS = [
     { key: "303.drive",     label: "Drive",     short_name: "Drv", type: "int", min: 0, max: 127, step: 1 },
     { key: "303.drive_mix", label: "Drive Mix", short_name: "Mix", type: "int", min: 0, max: 127, step: 1 },
 
-    { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "int",  min: 1, max: 16, step: 1 },
+    { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "enum", options: CHANNELS },
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
     { key: "transpose", label: "Transpose", short_name: "Oct+", type: "int",  min: -48, max: 48, step: 12 },
     /*
