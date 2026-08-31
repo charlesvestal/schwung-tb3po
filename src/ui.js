@@ -1419,21 +1419,18 @@ globalThis.init = function() {
     // from the first frame — same effect as the manual nudge, automatically.
     setDspParam("a.channel", String(ui.slots[0].channel));
     setDspParam("b.channel", String(ui.slots[1].channel));
-    // First-load nudge — call out the four-button slot/mode scheme so the
-    // user understands two slots (A/B) run in parallel on separate channels.
     /*
-     * SHORT ENOUGH TO SURVIVE THE BOX.
+     * NO STARTUP NUDGE.
      *
-     * drawOverlay prints "Value: <text>" at a fixed x inside a 120px frame and
-     * the device DISCARDS what runs past the screen edge, silently -- so
-     * "T1/T2 A, T3/T4 B" was drawn 20 pixels wide of it and read as
-     * "T1/T2 A, T3/T4" on hardware. Found by the render harness, which counts
-     * off-screen pixels, once a case put a real frame with this overlay up
-     * through it; the two other over-long strings ("Shift+X to confirm",
-     * "last pattern op") are shortened for the same reason. Anything here has
-     * to measure under ~115px with the "Value: " prefix in front of it.
+     * There was one -- "Slots A+B / T1T2=A T3T4=B", 360 ticks over the middle
+     * of the screen. Its own comment called it a FIRST-load nudge and nothing
+     * ever guarded it, so it fired on every open, including the hundredth.
+     *
+     * It is also answered better elsewhere now: the Keys page says what all
+     * four track buttons do, permanently, one jog turn away, and the header
+     * names the slot you are on at all times. A modal that covers the
+     * instrument to explain the instrument is the weakest form of that.
      */
-    showOverlay("Slots A+B", "T1T2=A T3T4=B", 360);
 
 };
 
