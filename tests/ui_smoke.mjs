@@ -55,10 +55,10 @@ function eq(name, got, want) {
     check(name, got === want, "got " + JSON.stringify(got) + ", want " + JSON.stringify(want));
 }
 
-/* Page 0 of a fresh ring is PERFORM, and no 303 has been found, so the ring is
+/* Page 0 of a fresh pages is PERFORM, and no 303 has been found, so the pages is
  * the five-page one. */
-const r = ui.ring();
-eq("ring is 5 pages with no 303", r.length, 5);
+const r = ui.pages();
+eq("pages is 5 pages with no 303", r.length, 5);
 eq("ring[0] is the perform page", r[0].kind, "perform");
 eq("page 0 is shown by default", ui.__test.curPage().name, "Steps");
 
@@ -278,6 +278,39 @@ for (const idx of r.keys()) {
     let threw = null;
     try { globalThis.tick(); } catch (e) { threw = e; }
     check("tick() draws page " + r[idx].name, threw === null, threw && threw.message);
+}
+
+/*
+ * Page navigation CAPS at both ends rather than wrapping.
+ *
+ * Wrapping hides the ends: nothing says the page set stopped, so you have to
+ * read the bank bar to know where you are. It is also what page_nav.mjs
+ * `step()` does for every other screen on the device, so wrapping was TB-3PO
+ * disagreeing with the rest of the device rather than a house style.
+ *
+ * Driven through the REAL jog message, not a helper: CC 14, where a value of
+ * 1 is one detent clockwise and 127 is one anticlockwise.
+ */
+{
+    const n = ui.pages().length;
+    const jog = (dir) => midi(0xB0, 14, dir > 0 ? 1 : 127);
+
+    ui.__test.pageIndex[0] = n - 1;
+    jog(+1);
+    check("jog past the last page stays put", ui.__test.pageIndex[0] === n - 1,
+          "index " + ui.__test.pageIndex[0] + " of " + n);
+
+    ui.__test.pageIndex[0] = 0;
+    jog(-1);
+    check("jog before the first page stays put", ui.__test.pageIndex[0] === 0,
+          "index " + ui.__test.pageIndex[0]);
+
+    ui.__test.pageIndex[0] = 0;
+    jog(+1);
+    check("jog still advances in the middle", ui.__test.pageIndex[0] === 1,
+          "index " + ui.__test.pageIndex[0]);
+
+    ui.__test.pageIndex[0] = 0;
 }
 
 console.log(failures === 0 ? "ui_smoke: all passed" : "ui_smoke: " + failures + " FAILED");

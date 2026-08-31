@@ -17,7 +17,7 @@ const { createFramebuffer, drawContext } =
 /* pages.mjs imports the shared library by device path, so it too must come
  * in dynamically — the transitive import is resolved at the same link time. */
 const { drawPage } = await import("../src/pages.mjs");
-const { ringFor, PAGE_PATTERN } = await import("../src/params.mjs");
+const { pagesFor, PAGE_PATTERN } = await import("../src/params.mjs");
 const { REST, NOTE, ACCENT, SLIDE } = await import("../src/lane.mjs");
 
 let bad = 0;
@@ -35,8 +35,8 @@ const view = {
               channel: 1, direction: 0, transpose: 0, current_bank: 3 },
 };
 
-const ring = ringFor({ has303: true });
-if (ring.length !== 6) fail("ring is not 6 pages");
+const pages = pagesFor({ has303: true });
+if (pages.length !== 6) fail("pages is not 6 pages");
 
 const litRows = (fb, y0, y1) => {
     let n = 0;
@@ -44,11 +44,11 @@ const litRows = (fb, y0, y1) => {
     return n;
 };
 
-ring.forEach((page, i) => {
+pages.forEach((page, i) => {
     const fb = createFramebuffer();
     const ctx = drawContext(fb);
     fb.clearScreen();
-    drawPage(fb, ctx, { ...view, ring, pageIndex: i });
+    drawPage(fb, ctx, { ...view, pages, pageIndex: i });
     if (fb.clipped() !== 0) fail(page.name + " drew " + fb.clipped() + " px off-screen");
     if ([...fb.missingGlyphs].length) fail(page.name + " uses glyphs the device lacks");
     if (litRows(fb, 57, 63) === 0) fail(page.name + " has an empty footer");
@@ -68,10 +68,10 @@ function footerAt(page, i, position) {
     const fb = createFramebuffer();
     const ctx = drawContext(fb);
     fb.clearScreen();
-    drawPage(fb, ctx, { ...view, ring, pageIndex: i, position });
+    drawPage(fb, ctx, { ...view, pages, pageIndex: i, position });
     return Buffer.from(fb.pixels.slice(57 * 128, 64 * 128)).toString("hex");
 }
-ring.forEach((page, i) => {
+pages.forEach((page, i) => {
     if (page.kind === "perform") return;
     const moved = footerAt(page, i, 2) !== footerAt(page, i, 9);
     const wantsLane = page.kind === "knobs";

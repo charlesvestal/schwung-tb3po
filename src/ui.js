@@ -15,7 +15,7 @@ import { drawEnumList } from '/data/UserData/schwung/shared/param_pages/enum_lis
 import { drawPage, META } from './pages.mjs';
 /* ROOT_NAMES and SCALE_NAMES are no longer imported: the grid formats
  * an enum from its DECLARED options, so the names live in one place. */
-import { ringFor, PAGE_PATTERN, LENGTHS, DIRECTIONS } from './params.mjs';
+import { pagesFor, PAGE_PATTERN, LENGTHS, DIRECTIONS } from './params.mjs';
 
 //
 // Knobs (CC 71-78, relative encoders) edit params. Pads are arranged 4x8
@@ -116,14 +116,14 @@ function cur() { return ui.slots[ui.activeSlot]; }
 let pollTick = 0;
 let shiftHeld = false;
 
-/* One ring per slot: the track buttons switch rings, and jog never crosses
+/* One pages per slot: the track buttons switch rings, and jog never crosses
  * the A/B boundary. That is what keeps a six-segment bank bar readable as a
  * map of this slot rather than as a scrollbar over both. */
 let pageIndex = [0, 0];
-export function ring() { return ringFor({ has303: has303Slot }); }
-function curPage() { return ring()[clampPageIndex(ui.activeSlot)]; }
+export function pages() { return pagesFor({ has303: has303Slot }); }
+function curPage() { return pages()[clampPageIndex(ui.activeSlot)]; }
 function clampPageIndex(slotIdx) {
-    const n = ring().length;
+    const n = pages().length;
     let i = pageIndex[slotIdx] | 0;
     if (i < 0) i = 0;
     if (i > n - 1) i = n - 1;
@@ -247,15 +247,15 @@ function pollDsp() {
     // reality: hidden when no 303 is loaded, visible when one is loaded later.
     if ((pollTick % 60) === 0) {
         /* The 303 page is PRESENT or ABSENT, so a plugin appearing or leaving
-         * changes the ring's LENGTH -- and every index behind the 303 page
+         * changes the page set's LENGTH -- and every index behind the 303 page
          * then names a different page. Resolve by NAME across the change
          * rather than clamping an index that has silently moved. */
-        const wasNames = [ring()[clampPageIndex(0)].name, ring()[clampPageIndex(1)].name];
+        const wasNames = [pages()[clampPageIndex(0)].name, pages()[clampPageIndex(1)].name];
         cc303SlotIdx = find303Slot();
         const prev = has303Slot;
         has303Slot = cc303SlotIdx >= 0;
         if (prev !== has303Slot) {
-            const r = ring();
+            const r = pages();
             for (let sIdx = 0; sIdx < 2; sIdx++) {
                 let found = r.findIndex((pg) => pg.name === wasNames[sIdx]);
                 if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
@@ -419,9 +419,21 @@ function announceStepWindow() {
  * edited by the knob above it, which is what the grid is for. */
 function handleJogTurn(delta) {
     if (delta === 0) return;
-    const n = ring().length;
+    /*
+     * CAPPED, not wrapped.
+     *
+     * Wrapping means the ends are invisible: you cannot feel where the page
+     * set stops, so you have to read the bank bar to know where you are.
+     * Capping gives the gesture a floor and a ceiling to run into.
+     *
+     * It is also what the rest of the device does -- page_nav.mjs `step()` is
+     * clampIndex(clampIndex(index) + delta), no modulo -- so wrapping here was
+     * TB-3PO disagreeing with every other Schwung screen, not a house style.
+     */
+    const n = pages().length;
     const step = delta > 0 ? 1 : -1;
-    pageIndex[ui.activeSlot] = (clampPageIndex(ui.activeSlot) + step + n) % n;
+    const next = clampPageIndex(ui.activeSlot) + step;
+    pageIndex[ui.activeSlot] = next < 0 ? 0 : (next > n - 1 ? n - 1 : next);
 }
 
 /*
@@ -677,7 +689,7 @@ function send303Cc(knobIdx, delta) {
  *
  * 3PO vs 303 was a KNOB mode because there was nowhere to show it; it is two
  * pages now and the header names them. With no 303 reachable the 303 page is
- * absent from the ring, so T2/T4 land on Pattern -- there is nothing to refuse
+ * absent from the pages, so T2/T4 land on Pattern -- there is nothing to refuse
  * and no overlay explaining a refusal.
  *
  * The 303 scan is forced here so a just-loaded 303 is picked up without
@@ -690,7 +702,7 @@ function selectSlotPage(slotIdx, pageName) {
     }
     ui.activeSlot = slotIdx;
     setDspParam("active_slot", String(slotIdx));
-    const r = ring();
+    const r = pages();
     let found = r.findIndex((pg) => pg.name === pageName);
     if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
     pageIndex[slotIdx] = found < 0 ? 0 : found;
@@ -881,10 +893,10 @@ function refreshLeds() {
     setLed(0, 6, LED_OFF);
     setLed(0, 7, LED_OFF);
 
-    // Step buttons — page selector, one per page in the CURRENT ring (five or
+    // Step buttons — page selector, one per page in the CURRENT pages (five or
     // six, depending on whether a 303 is reachable). Available = white,
     // current = green.
-    const pageCount = ring().length;
+    const pageCount = pages().length;
     const shownPage = clampPageIndex(ui.activeSlot);
     for (let i = 0; i < NUM_STEP_BUTTONS; i++) {
         if (i < pageCount) {
@@ -947,7 +959,7 @@ function draw() {
         return;
     }
     const slot = cur();
-    const r = ring();
+    const r = pages();
     const idx = clampPageIndex(ui.activeSlot);
     /* A knob with no key on this page has no cell to strip, and Setup's
      * knobs 5-8 have no key at all -- so the touch is reported only where
@@ -961,7 +973,7 @@ function draw() {
          * the knob that would open it is under a hand. */
         slotLabel: "Slot " + (ui.activeSlot === 0 ? "A" : "B"),
         bpm: ui.bpm,
-        ring: r,
+        pages: r,
         pageIndex: idx,
         steps: slot.steps,
         position: slot.position,
@@ -1163,11 +1175,11 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    // Step buttons (notes 16-31) — page selector, clamped to the ring, which
+    // Step buttons (notes 16-31) — page selector, clamped to the pages, which
     // is five or six long depending on whether a 303 is reachable.
     if (type === 0x90 && d1 >= NOTE_STEP_BASE && d1 < NOTE_STEP_BASE + NUM_STEP_BUTTONS && d2 > 0) {
         const stepIdx = d1 - NOTE_STEP_BASE;
-        if (stepIdx >= 0 && stepIdx < ring().length) {
+        if (stepIdx >= 0 && stepIdx < pages().length) {
             pageIndex[ui.activeSlot] = stepIdx;
         }
         return;

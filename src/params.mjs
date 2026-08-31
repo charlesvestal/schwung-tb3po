@@ -114,10 +114,10 @@ export const PAGE_KEYS = { name: "Keys", kind: "keys" };
  *
  * The 303 page is ABSENT rather than disabled when no 303 plugin is
  * reachable. Today that case is a refusal with an overlay explaining it; a
- * ring has nothing to refuse — the bank bar draws five segments and the
+ * pages has nothing to refuse — the bank bar draws five segments and the
  * buttons that would have gone there land on Pattern.
  */
-export function ringFor({ has303 }) {
+export function pagesFor({ has303 }) {
     const pages = [PAGE_PERFORM, PAGE_PATTERN];
     if (has303) pages.push(PAGE_303);
     pages.push(PAGE_SETUP, PAGE_PADS, PAGE_KEYS);

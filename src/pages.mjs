@@ -31,16 +31,16 @@ function common(view) {
 
 /**
  * @param {object} view
- *   slotLabel, bpm, ring, pageIndex, steps, position, values, touched,
+ *   slotLabel, bpm, pages, pageIndex, steps, position, values, touched,
  *   shiftHeld
  */
 export function drawPage(fb, ctx, view) {
-    const page = view.ring[view.pageIndex];
+    const page = view.pages[view.pageIndex];
 
     if (page.kind === "knobs") {
         renderPageMovy(ctx, Object.assign(common(view), {
             page, title: view.slotLabel,
-            pageIndex: view.pageIndex, pageCount: view.ring.length,
+            pageIndex: view.pageIndex, pageCount: view.pages.length,
         }));
         drawFooterLane(fb, ctx, view, page);
         return;
@@ -51,7 +51,7 @@ export function drawPage(fb, ctx, view) {
         ? page.name + " " + (view.stepView * 16 + 1) + "-" + (view.stepView * 16 + 16)
         : page.name;
     drawHeader(ctx, view.slotLabel + " - " + (view.bpm | 0), pageName, false);
-    drawBankBar(ctx, view.pageIndex, view.ring.length, null);
+    drawBankBar(ctx, view.pageIndex, view.pages.length, null);
 
     if (page.kind === "perform") {
         /* The window the USER chose, because the pads edit what is shown. */

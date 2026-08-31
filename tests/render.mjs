@@ -83,7 +83,7 @@ export async function main(cases) {
 }
 
 const { drawPage } = await import("../src/pages.mjs");
-const { ringFor } = await import("../src/params.mjs");
+const { pagesFor } = await import("../src/params.mjs");
 const { REST, NOTE, ACCENT, SLIDE } = await import("../src/lane.mjs");
 
 const VIEW = {
@@ -100,26 +100,26 @@ const VIEW = {
               channel: 0, direction: 0, transpose: 0, current_bank: 3 },
 };
 
-const ring = ringFor({ has303: true });
-const cases = ring.map((page, i) =>
+const pages = pagesFor({ has303: true });
+const cases = pages.map((page, i) =>
     [page.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-     (fb, ctx) => drawPage(fb, ctx, { ...VIEW, ring, pageIndex: i })]);
+     (fb, ctx) => drawPage(fb, ctx, { ...VIEW, pages, pageIndex: i })]);
 
-/* The states a static walk of the ring cannot reach. */
+/* The states a static walk of the pages cannot reach. */
 cases.push(["pads-shift", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 4, shiftHeld: true })]);
+    drawPage(fb, ctx, { ...VIEW, pages, pageIndex: 4, shiftHeld: true })]);
 cases.push(["pattern-touched", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 1, touched: 1 })]);
-/* And the ring one page short, which is what no 303 loaded looks like. */
+    drawPage(fb, ctx, { ...VIEW, pages, pageIndex: 1, touched: 1 })]);
+/* And the pages one page short, which is what no 303 loaded looks like. */
 /* The dive affordance and the picker it opens — rendered and eyeballed when
  * they were built, but nothing pinned them, so a footer that stopped offering
  * the dive would have been a silent regression. */
 cases.push(["setup-divable-held", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 3, touched: 1 })]);
+    drawPage(fb, ctx, { ...VIEW, pages, pageIndex: 3, touched: 1 })]);
 
-const short = ringFor({ has303: false });
+const short = pagesFor({ has303: false });
 cases.push(["no-303-ring", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, ring: short, pageIndex: 0 })]);
+    drawPage(fb, ctx, { ...VIEW, pages: short, pageIndex: 0 })]);
 
 /*
  * The window work landed after the plan's case list was written: a 32-step
@@ -136,9 +136,9 @@ const STEPS32 = [
 ];
 const VIEW32 = { ...VIEW, steps: STEPS32, values: { ...VIEW.values, length: 3 } };
 cases.push(["perform-window2", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW32, ring, pageIndex: 0, stepView: 1, position: 20 })]);
+    drawPage(fb, ctx, { ...VIEW32, pages, pageIndex: 0, stepView: 1, position: 20 })]);
 cases.push(["pattern-window2", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW32, ring, pageIndex: 1, position: 20 })]);
+    drawPage(fb, ctx, { ...VIEW32, pages, pageIndex: 1, position: 20 })]);
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     const failCount = await main(cases);

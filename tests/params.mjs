@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { TB3PO_PARAMS, PAGE_PATTERN, ringFor } from "../src/params.mjs";
+import { TB3PO_PARAMS, PAGE_PATTERN, pagesFor } from "../src/params.mjs";
 /* Dynamic, not static: see the note in Task 4. params.mjs itself is pure data
  * with no device imports, so it may stay static. */
 const { buildMetaIndex, isReadOnly } =
@@ -18,9 +18,9 @@ const meta = buildMetaIndex({ chainParams: TB3PO_PARAMS });
 if (meta.getOrGuess("density").kind !== "number") fail("density is not a number");
 if (meta.getOrGuess("scale").kind !== "enum") fail("scale is not an enum");
 
-if (ringFor({ has303: true }).length !== 6) fail("ring with a 303 is not 6 pages");
-const without = ringFor({ has303: false });
-if (without.length !== 5) fail("ring without a 303 is not 5 pages");
+if (pagesFor({ has303: true }).length !== 6) fail("pages with a 303 is not 6 pages");
+const without = pagesFor({ has303: false });
+if (without.length !== 5) fail("pages without a 303 is not 5 pages");
 if (without.some((p) => p.name === "303")) fail("303 page present with no 303 loaded");
 
 const row0 = PAGE_PATTERN.keys.slice(0, 4).join(",");
@@ -29,7 +29,7 @@ if (row0 !== "density,accent,slide,gate") fail("Pattern row 0 is " + row0);
 /* Every key a page names must be declared, or the grid invents a
  * float 0..1 knob and writes 0.058750 into an enum. */
 const declared = new Set(TB3PO_PARAMS.map((p) => p.key));
-for (const page of ringFor({ has303: true })) {
+for (const page of pagesFor({ has303: true })) {
     for (const k of (page.keys || [])) {
         if (k && !declared.has(k)) fail("page " + page.name + " names undeclared key " + k);
     }
