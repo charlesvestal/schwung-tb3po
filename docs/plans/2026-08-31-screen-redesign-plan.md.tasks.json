@@ -1,0 +1,94 @@
+{
+  "planPath": "docs/plans/2026-08-31-screen-redesign-plan.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 1: Host-side render harness",
+      "status": "pending",
+      "description": "**Goal:** A test rig that can import TB-3PO's drawing modules on a Mac and assert what they put on a 128\u00d764 framebuffer.\n\n**Files:**\n- Create: `tests/hooks.mjs`\n- Create: `tests/render.mjs`\n- Create: `tests/run.sh`\n- Create: `tests/snapshots/.gitkeep`\n\n**Acceptance Criteria:**\n- [ ] `bash tests/run.sh` exits 0 with no drawing modules yet present, reporting \"0 pages\"\n- [ ] The hook resolves `/data/UserData/schwung/shared/param_pages/render_page_movy.mjs` to the sibling repo\n- [ ] The run fails loudly, not silently, when the sibling `schwung` repo is absent\n\n**Verify:** `bash tests/run.sh` \u2192 `harness ok \u2014 0 pages` and exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 1: Host-side render harness` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"tests/hooks.mjs\", \"tests/render.mjs\", \"tests/run.sh\"], \"verifyCommand\": \"bash tests/run.sh\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"`bash tests/run.sh` exits 0 with no drawing modules yet present, reporting \\\"0 pages\\\"\", \"The hook resolves `/data/UserData/schwung/shared/param_pages/render_page_movy.mjs` to the sibling repo\", \"The run fails loudly, not silently, when the sibling `schwung` repo is absent\"]}\n```"
+    },
+    {
+      "id": 1,
+      "subject": "Task 2: Param contract and page ring",
+      "status": "pending",
+      "description": "**Goal:** The `chain_params`-shaped declaration the grid reads its widgets from, and the ring definition that says which pages exist.\n\n**Files:**\n- Create: `src/params.mjs`\n- Test: `tests/params.mjs`\n\n**Acceptance Criteria:**\n- [ ] `buildMetaIndex({ chainParams: TB3PO_PARAMS })` returns `kind: \"number\"` for `density` and `kind: \"enum\"` for `scale`\n- [ ] `ringFor({ has303: true })` returns 6 pages; `ringFor({ has303: false })` returns 5 and contains no page named `303`\n- [ ] Pattern row 0 is exactly `[\"density\", \"accent\", \"slide\", \"gate\"]` \u2014 the four PERFORM inherits\n- [ ] Every key named in a page exists in `TB3PO_PARAMS`\n\n**Verify:** `node tests/params.mjs` \u2192 `params ok` and exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 2: Param contract and page ring` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"src/params.mjs\", \"tests/params.mjs\"], \"verifyCommand\": \"node tests/params.mjs\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"`buildMetaIndex({ chainParams: TB3PO_PARAMS })` returns `kind: \\\"number\\\"` for `density` and `kind: \\\"enum\\\"` for `scale`\", \"`ringFor({ has303: true })` returns 6 pages; `ringFor({ has303: false })` returns 5 and contains no page named `303`\", \"Pattern row 0 is exactly `[\\\"density\\\", \\\"accent\\\", \\\"slide\\\", \\\"gate\\\"]` \\u2014 the four PERFORM inherits\", \"Every key named in a page exists in `TB3PO_PARAMS`\"]}\n```",
+      "blockedBy": [
+        0
+      ]
+    },
+    {
+      "id": 2,
+      "subject": "Task 3: The step lane",
+      "status": "pending",
+      "description": "**Goal:** `drawBigLane` and `drawMiniLane`, including tie geometry, as pure functions.\n\n**Files:**\n- Create: `src/lane.mjs`\n- Test: `tests/lane.mjs`\n\n**Acceptance Criteria:**\n- [ ] A tie's connector pixel sits at a row where BOTH bars have pixels \u2014 asserted for accent\u2192note, note\u2192accent and note\u2192note\n- [ ] The connector is two rows below the deeper of the two heads\n- [ ] The playhead column is full height in the mini lane and does not occupy the tie row\n- [ ] Neither lane draws outside the rect it is given\n\n**Verify:** `node tests/lane.mjs` \u2192 `lane ok` and exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 3: The step lane` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"src/lane.mjs\", \"tests/lane.mjs\"], \"verifyCommand\": \"node tests/lane.mjs\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"A tie's connector pixel sits at a row where BOTH bars have pixels \\u2014 asserted for accent\\u2192note, note\\u2192accent and note\\u2192note\", \"The connector is two rows below the deeper of the two heads\", \"The playhead column is full height in the mini lane and does not occupy the tie row\", \"Neither lane draws outside the rect it is given\"]}\n```",
+      "blockedBy": [
+        1
+      ]
+    },
+    {
+      "id": 3,
+      "subject": "Task 4: Pads and Keys pages",
+      "status": "pending",
+      "description": "**Goal:** The to-scale pad map with its live Shift variant, and the hardware-key reference, both with build-time width guards.\n\n**Files:**\n- Create: `src/pad_map.mjs`\n- Test: `tests/pad_map.mjs`\n\n**Acceptance Criteria:**\n- [ ] Every action-pad label fits `CELL_W - 2` = 14px, asserted by measuring, not by eye\n- [ ] No two Keys columns overlap, asserted by measuring\n- [ ] `drawPadsPage(..., { shiftHeld: true })` differs from `shiftHeld: false`\n- [ ] Neither page draws off-screen\n\n**Verify:** `node tests/pad_map.mjs` \u2192 `pad map ok` and exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 4: Pads and Keys pages` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"src/pad_map.mjs\", \"tests/pad_map.mjs\"], \"verifyCommand\": \"node tests/pad_map.mjs\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"Every action-pad label fits `CELL_W - 2` = 14px, asserted by measuring, not by eye\", \"No two Keys columns overlap, asserted by measuring\", \"`drawPadsPage(..., { shiftHeld: true })` differs from `shiftHeld: false`\", \"Neither page draws off-screen\"]}\n```",
+      "blockedBy": [
+        2
+      ]
+    },
+    {
+      "id": 4,
+      "subject": "Task 5: Page composition",
+      "status": "pending",
+      "description": "**Goal:** One entry point that draws any page in the ring \u2014 header, bank bar, body, footer \u2014 including the footer lane.\n\n**Files:**\n- Create: `src/pages.mjs`\n- Test: `tests/pages.mjs`\n\n**Acceptance Criteria:**\n- [ ] `drawPage` handles all five page kinds (`perform`, `knobs`, `pads`, `keys`) without falling through\n- [ ] PERFORM draws its knob row from `PAGE_PATTERN.keys` slots 0\u20133, not from a copy\n- [ ] Every non-PERFORM page draws the mini lane in the footer band\n- [ ] The bank bar segment count equals the ring length\n\n**Verify:** `node tests/pages.mjs` \u2192 `pages ok` and exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 5: Page composition` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"src/pages.mjs\", \"tests/pages.mjs\"], \"verifyCommand\": \"node tests/pages.mjs\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"`drawPage` handles all five page kinds (`perform`, `knobs`, `pads`, `keys`) without falling through\", \"PERFORM draws its knob row from `PAGE_PATTERN.keys` slots 0\\u20133, not from a copy\", \"Every non-PERFORM page draws the mini lane in the footer band\", \"The bank bar segment count equals the ring length\"]}\n```",
+      "blockedBy": [
+        3
+      ]
+    },
+    {
+      "id": 5,
+      "subject": "Task 6: Wire the renders into the harness",
+      "status": "pending",
+      "description": "**Goal:** Every page rendered and snapshotted by `tests/run.sh`, so a layout change is a diff rather than a report from hardware.\n\n**Files:**\n- Modify: `tests/render.mjs`\n- Create: `tests/snapshots/*.txt` (generated)\n\n**Acceptance Criteria:**\n- [ ] `bash tests/run.sh` renders at least 8 cases (six pages, the Shift variant, a touched knob)\n- [ ] All report zero clipped pixels and no missing glyphs\n- [ ] A second run with no changes passes against the stored snapshots\n\n**Verify:** `bash tests/run.sh` \u2192 `harness ok \u2014 8 pages` and exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 6: Wire the renders into the harness` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"tests/render.mjs\", \"tests/snapshots\"], \"verifyCommand\": \"bash tests/run.sh\", \"modelTier\": \"mechanical\", \"acceptanceCriteria\": [\"`bash tests/run.sh` renders at least 8 cases (six pages, the Shift variant, a touched knob)\", \"All report zero clipped pixels and no missing glyphs\", \"A second run with no changes passes against the stored snapshots\"]}\n```",
+      "blockedBy": [
+        4
+      ]
+    },
+    {
+      "id": 6,
+      "subject": "Task 7: Rewrite ui.js onto the new drawing",
+      "status": "pending",
+      "description": "**Goal:** `ui.js` uses the ring, the new draw layer and knob-driven editing; its hand-rolled draw layer and jog-menu machinery are gone.\n\n**Files:**\n- Modify: `src/ui.js` \u2014 delete lines 819\u2013987 (the `// -------- Display ----------` block through `draw()`), delete `349\u2013603` (jog-menu items and handlers), rewrite `handleKnob`/`knobOverlayInfo`, add ring state\n- Modify: `src/params.mjs` \u2014 no change, imported\n\n**Acceptance Criteria:**\n- [ ] `node --check src/ui.js` passes and no reference to `drawMenuList`, `menuState`, `MODE_303`, `PAGE_MUTATION` or `drawBar` remains\n- [ ] Jog turn changes `pageIndex`; jog click no longer enters an edit mode\n- [ ] Step buttons 1\u20136 jump to a page; T1\u2013T4 set slot and page\n- [ ] Knob N edits the key at `ring[pageIndex].keys[N]` on a knobs page, and `PAGE_PATTERN.keys[N]` for N<4 on PERFORM\n- [ ] Knobs 4\u20137 do nothing on PERFORM\n\n**Verify:** `node --check src/ui.js && bash tests/run.sh` \u2192 both exit 0\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 7: Rewrite ui.js onto the new drawing` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"src/ui.js\"], \"verifyCommand\": \"node --check src/ui.js && bash tests/run.sh\", \"modelTier\": \"complex\", \"acceptanceCriteria\": [\"`node --check src/ui.js` passes and no reference to `drawMenuList`, `menuState`, `MODE_303`, `PAGE_MUTATION` or `drawBar` remains\", \"Jog turn changes `pageIndex`; jog click no longer enters an edit mode\", \"Step buttons 1\\u20136 jump to a page; T1\\u2013T4 set slot and page\", \"Knob N edits the key at `ring[pageIndex].keys[N]` on a knobs page, and `PAGE_PATTERN.keys[N]` for N<4 on PERFORM\", \"Knobs 4\\u20137 do nothing on PERFORM\"]}\n```",
+      "blockedBy": [
+        5
+      ]
+    },
+    {
+      "id": 7,
+      "subject": "Task 8: Ship the new files",
+      "status": "pending",
+      "description": "**Goal:** The `.mjs` modules reach the device, and the module gates on a host that exports what it needs.\n\n**Files:**\n- Modify: `scripts/build.sh:49-51`\n- Modify: `src/module.json`\n- Modify: `src/help.json`\n\n**Acceptance Criteria:**\n- [ ] `dist/tb3po/` contains `ui.js`, `params.mjs`, `lane.mjs`, `pad_map.mjs`, `pages.mjs`, `dsp.so`, `module.json`, `help.json`\n- [ ] The tarball contains the same, under a top-level `tb3po/`\n- [ ] `module.json` declares a `min_host_version` covering the `drawFooter` change\n- [ ] `help.json` describes the six pages, not the old five\n\n**Verify:** `./scripts/build.sh && tar -tzf dist/tb3po-module.tar.gz` \u2192 lists all four `.mjs` files\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 8: Ship the new files` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"scripts/build.sh\", \"src/module.json\", \"src/help.json\"], \"verifyCommand\": \"./scripts/build.sh && tar -tzf dist/tb3po-module.tar.gz\", \"modelTier\": \"mechanical\", \"acceptanceCriteria\": [\"`dist/tb3po/` contains `ui.js`, `params.mjs`, `lane.mjs`, `pad_map.mjs`, `pages.mjs`, `dsp.so`, `module.json`, `help.json`\", \"The tarball contains the same, under a top-level `tb3po/`\", \"`module.json` declares a `min_host_version` covering the `drawFooter` change\", \"`help.json` describes the six pages, not the old five\"]}\n```",
+      "blockedBy": [
+        6
+      ]
+    },
+    {
+      "id": 8,
+      "subject": "Task 9: The drawFooter left-hint change (schwung repo)",
+      "status": "pending",
+      "description": "**Goal:** A footer hint can sit left when something else owns the right edge.\n\n**Files:**\n- Modify: `../schwung/src/shared/param_pages/render_page_movy.mjs` \u2014 `drawFooter`, around line 2571\n- Test: `../schwung/tests/host/test_footer_hint_side.sh`\n\n**Acceptance Criteria:**\n- [ ] `drawFooter(ctx, hints, { backLeft: true })` places the back hint at the left edge\n- [ ] Default behaviour is unchanged \u2014 every existing snapshot in the schwung suite still passes\n- [ ] TB-3PO's footer lane no longer overlaps a pill\n\n**Verify:** `cd ../schwung && make -C tests/host test && for t in tests/host/*.sh; do bash \"$t\"; done` \u2192 all green\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 9: The drawFooter left-hint change (schwung repo)` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [\"../schwung/src/shared/param_pages/render_page_movy.mjs\", \"../schwung/tests/host/test_footer_hint_side.sh\"], \"verifyCommand\": \"cd ../schwung && make -C tests/host test\", \"modelTier\": \"complex\", \"acceptanceCriteria\": [\"`drawFooter(ctx, hints, { backLeft: true })` places the back hint at the left edge\", \"Default behaviour is unchanged \\u2014 every existing snapshot in the schwung suite still passes\", \"TB-3PO's footer lane no longer overlaps a pill\"]}\n```",
+      "blockedBy": [
+        4
+      ]
+    },
+    {
+      "id": 9,
+      "subject": "Task 10: Hardware verification",
+      "status": "pending",
+      "description": "**Goal:** Confirm on a Move the three behaviours no host-side render can prove.\n\n**Files:**\nnone\n\n**Acceptance Criteria:**\n- [ ] Holding a knob on PERFORM puts that param's full name and value in the header strip\n- [ ] The Pads page redraws while Shift is held and reverts on release\n- [ ] With no 303 loaded the bank bar shows five segments, and T2 lands on Pattern with no overlay\n- [ ] Jog crosses all six pages and does not cross into the other slot\n- [ ] The footer lane advances with the sequencer on Pattern, 303, Setup, Pads and Keys\n\n**Verify:** manual, on device\n\n**Steps:** see `docs/plans/2026-08-31-screen-redesign-plan.md` section `### Task 10: Hardware verification` \u2014 follow it verbatim; every step's code is written out there.\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"manual, on device\", \"modelTier\": \"standard\", \"acceptanceCriteria\": [\"Holding a knob on PERFORM puts that param's full name and value in the header strip\", \"The Pads page redraws while Shift is held and reverts on release\", \"With no 303 loaded the bank bar shows five segments, and T2 lands on Pattern with no overlay\", \"Jog crosses all six pages and does not cross into the other slot\", \"The footer lane advances with the sequencer on Pattern, 303, Setup, Pads and Keys\"]}\n```",
+      "blockedBy": [
+        7,
+        8
+      ]
+    }
+  ],
+  "lastUpdated": "2026-08-31T12:33:39.031281"
+}
