@@ -27,7 +27,7 @@ const view = {
     slotLabel: "Slot A", bpm: 124, shiftHeld: false, touched: -1,
     steps: [ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
             REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT],
-    position: 6,
+    position: 6, stepView: 0,
     values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
               root: 9, scale: 0, length: 1, octaves: 2,
               "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
@@ -51,13 +51,32 @@ ring.forEach((page, i) => {
     drawPage(fb, ctx, { ...view, ring, pageIndex: i });
     if (fb.clipped() !== 0) fail(page.name + " drew " + fb.clipped() + " px off-screen");
     if ([...fb.missingGlyphs].length) fail(page.name + " uses glyphs the device lacks");
-    /* The footer band carries the lane on every page but PERFORM. */
-    const footerLit = litRows(fb, 57, 63);
-    if (page.kind === "perform") {
-        if (footerLit === 0) fail("PERFORM has an empty footer");
-    } else if (footerLit === 0) {
-        fail(page.name + " has no footer lane");
-    }
+    if (litRows(fb, 57, 63) === 0) fail(page.name + " has an empty footer");
+});
+
+/*
+ * Whether the footer holds a LANE, distinguished from whether it holds
+ * anything at all.
+ *
+ * "the band has lit pixels" passes on hint text, so it cannot tell a lane from
+ * a footer that never got one -- which is exactly the bug it was written to
+ * catch. A lane MOVES: render the same page at two playhead positions and the
+ * band must differ. Hint text is identical either way, so the same probe
+ * proves the negative for Pads and Keys.
+ */
+function footerAt(page, i, position) {
+    const fb = createFramebuffer();
+    const ctx = drawContext(fb);
+    fb.clearScreen();
+    drawPage(fb, ctx, { ...view, ring, pageIndex: i, position });
+    return Buffer.from(fb.pixels.slice(57 * 128, 64 * 128)).toString("hex");
+}
+ring.forEach((page, i) => {
+    if (page.kind === "perform") return;
+    const moved = footerAt(page, i, 2) !== footerAt(page, i, 9);
+    const wantsLane = page.kind === "knobs";
+    if (wantsLane && !moved) fail(page.name + ": footer does not track the playhead — no lane");
+    if (!wantsLane && moved) fail(page.name + ": footer changed with the playhead but should be hints");
 });
 
 /* PERFORM's row must be Pattern's row 0, not a copy of it. */

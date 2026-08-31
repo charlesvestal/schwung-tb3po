@@ -13,7 +13,7 @@ import { buildMetaIndex }
 import { createAnimState }
     from "/data/UserData/schwung/shared/param_pages/anim_state.mjs";
 import { TB3PO_PARAMS, PAGE_PATTERN } from "./params.mjs";
-import { drawBigLane, drawMiniLane } from "./lane.mjs";
+import { drawBigLane, drawMiniLane, windowFor } from "./lane.mjs";
 import { drawPadsPage, drawKeysPage } from "./pad_map.mjs";
 
 export const META = buildMetaIndex({ chainParams: TB3PO_PARAMS });
@@ -46,11 +46,17 @@ export function drawPage(fb, ctx, view) {
         return;
     }
 
-    drawHeader(ctx, view.slotLabel + " - " + (view.bpm | 0), page.name, false);
+    /* PERFORM's page name names the window: "Steps 1-16", "Steps 17-32". */
+    const pageName = page.kind === "perform"
+        ? page.name + " " + (view.stepView * 16 + 1) + "-" + (view.stepView * 16 + 16)
+        : page.name;
+    drawHeader(ctx, view.slotLabel + " - " + (view.bpm | 0), pageName, false);
     drawBankBar(ctx, view.pageIndex, view.ring.length, null);
 
     if (page.kind === "perform") {
-        drawBigLane(fb, ctx, view, { x: 0, y: 12, w: 128, h: 22 });
+        /* The window the USER chose, because the pads edit what is shown. */
+        drawBigLane(fb, ctx, { ...view, stepBase: view.stepView * 16 },
+                    { x: 0, y: 12, w: 128, h: 22 });
         /*
          * A GENUINE grid row, from Pattern's own key list: drawKnobRow takes
          * its own rowY/lblY, so this is the same code Pattern runs rather than
@@ -89,10 +95,19 @@ export function drawPage(fb, ctx, view) {
  *
  * This is the only spare real estate on the screen: the bank bar is 2px at
  * y=7 and the grid rows start at y=9, so there is nothing between them. The
- * footer is seven pixels currently spent on hints that stop being read.
+ * footer is seven pixels otherwise spent on hints that stop being read.
+ *
+ * KNOB PAGES ONLY, deliberately. Pads and Keys are pages you READ rather than
+ * play, and their footers carry the one thing those pages cannot say any other
+ * way -- "TAP: REST>NOTE>ACC>SLIDE" is not derivable from a picture of the pad
+ * grid, and it has nowhere else to go, the map filling the body. Trading that
+ * for an ambient lane on a page nobody performs from is the wrong way round.
  */
 function drawFooterLane(fb, ctx, view) {
     drawFooter(ctx, [["JOG", "PAGE"]]);
     ctx.fillRect(46, 56, 82, 8, 0);
-    drawMiniLane(fb, ctx, view, { x: 48, y: FOOTER_BAND.y, w: 80, h: FOOTER_BAND.h });
+    /* The window the MUSIC is in, because nothing here is editable and there
+     * is no room to say which window you are looking at. */
+    drawMiniLane(fb, ctx, { ...view, stepBase: windowFor(view.position) },
+                 { x: 48, y: FOOTER_BAND.y, w: 80, h: FOOTER_BAND.h });
 }
