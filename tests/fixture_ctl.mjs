@@ -11,11 +11,14 @@
  *
  * The values are WIRE values, which is the one thing a fixture can get wrong
  * without the picture looking wrong. `length` and `channel` are declared
- * `options_as_string`, so their wire value is the OPTION TEXT -- "16 Steps",
- * "Ch 1" -- and a bare "1" here does not fail, it silently falls through to
- * the numeric reading and renders channel TWO. Which is precisely the class of
- * defect those declarations exist to prevent, arriving through the fixture
- * instead of through the code.
+ * `options_as_string`, so the wire value is the OPTION TEXT and the text here
+ * has to BE one of the declared options.
+ *
+ * A value that is not an option does not fail -- it falls through to the
+ * numeric reading and is taken as an INDEX. Here that is survivable because
+ * the options are now the numbers themselves, but it is still how a fixture
+ * lies: write "0" for `channel` and the picture shows channel ONE, silently,
+ * because "0" is not an option and index 0 is "1".
  */
 import { hierarchyFor, TB3PO_PARAMS } from "../src/params.mjs";
 
@@ -24,10 +27,10 @@ const { createController, LAYOUT_MOVY } =
 
 export const FIXTURE_VALUES = {
     density: "0.72", accent: "0.4", slide: "0.25", gate: "0.55",
-    root: "9", scale: "0", length: "16 Steps", octaves: "2",
+    root: "9", scale: "0", length: "16", octaves: "2",
     "303.cutoff": "96", "303.resonance": "74", "303.decay": "58", "303.env_mod": "88",
     "303.accent": "64", "303.volume": "100", "303.drive": "30", "303.drive_mix": "45",
-    channel: "Ch 1", direction: "0", transpose: "0", current_bank: "3",
+    channel: "1", direction: "0", transpose: "0", current_bank: "3",
 };
 
 /**

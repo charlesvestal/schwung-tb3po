@@ -34,27 +34,28 @@ export const DIRECTIONS = ["Fwd", "Rev", "Ping", "Rnd"];
  * got (NARROW_RANGE_MAX is 16).
  */
 /*
- * "Ch 1" .. "Ch 16", NOT "1" .. "16", and the prefix is load-bearing.
+ * These two enums wire their VALUE as text, not an index.
  *
- * See the note above TB3PO_PARAMS: the shared write path resolves an enum by
- * `options.indexOf(String(value))` BEFORE reading the value as an index, so an
- * option whose text IS a small decimal shadows that index. With bare numerals
- * this enum wrote the wrong channel for thirteen of the sixteen -- index 7
- * matched the option named "7" and set channel 7 instead of 8 -- silently, on
- * both the knob and the picker.
+ * `options_as_string` is not a workaround, it is what the DSP speaks: `length`
+ * takes a step COUNT and `channel` a channel NUMBER, so "16" and "10" are the
+ * literal wire values and ui.js reads the integer straight out of them.
  *
- * The three-character cell still shows the bare number: `short_options` is
- * what the enum square draws, and it never reaches the wire.
+ * The option text used to be padded -- "Ch 10", "16 Steps" -- for a different
+ * reason, and that one WAS a workaround. The host's formatParamForSet resolved
+ * an enum by `options.indexOf(String(value))` BEFORE reading the value as an
+ * index, so an option whose text was a small decimal shadowed that index:
+ * index 7 matched the option named "7" and set channel 7 instead of 8,
+ * silently, on the knob and in the picker, for thirteen of the sixteen. The
+ * padding made the text un-shadowable and `short_options` put the bare number
+ * back in the 30px cell.
+ *
+ * schwung#376 fixed the precedence -- a number is an index, a name is a name --
+ * so the padding buys nothing now and cost a word in every picker row. There
+ * is no host that can run this module and still has the bug: TB-3PO already
+ * requires the embedding API, which merged the same day.
  */
-export const CHANNELS = Array.from({ length: 16 }, (_, i) => "Ch " + (i + 1));
-export const CHANNEL_SHORT = Array.from({ length: 16 }, (_, i) => String(i + 1));
-
-/* Same rule, and here it also reads better: the picker says what the number
- * counts. LENGTHS' bare numerals happened to be safe -- "0".."3" are not among
- * "8","16","24","32" -- but safe by coincidence is one added option away from
- * unsafe, and nothing would have failed to say so. */
-export const LENGTH_OPTIONS = LENGTHS.map((n) => n + " Steps");
-export const LENGTH_SHORT = LENGTHS.map(String);
+export const CHANNELS = Array.from({ length: 16 }, (_, i) => String(i + 1));
+export const LENGTH_OPTIONS = LENGTHS.map(String);
 
 /*
  * AN ENUM OPTION MUST NEVER READ AS ONE OF ITS OWN INDICES.
@@ -101,8 +102,8 @@ export const TB3PO_PARAMS = [
     { key: "gate",    label: "Gate",    short_name: "Gate",  type: "float", min: 0.1, max: 1, step: 0.01, unit: "%" },
     { key: "root",    label: "Root",    short_name: "Root",  type: "enum",  options: ROOT_NAMES },
     { key: "scale",   label: "Scale",   short_name: "Scale", type: "enum",  options: SCALE_NAMES },
-    { key: "length",  label: "Length",  short_name: "Len",   type: "enum",  options: LENGTH_OPTIONS,
-      short_options: LENGTH_SHORT, options_as_string: true },
+    { key: "length",  label: "Length",  short_name: "Len",   type: "enum",
+      options: LENGTH_OPTIONS, options_as_string: true },
     { key: "octaves", label: "Octaves", short_name: "Oct",   type: "int",   min: 1, max: 3, step: 1 },
 
     /*
@@ -129,7 +130,7 @@ export const TB3PO_PARAMS = [
     { key: "303.drive_mix", label: "Drive Mix", short_name: "Mix", type: "int", min: 0, max: 127, step: 1 },
 
     { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "enum", options: CHANNELS,
-      short_options: CHANNEL_SHORT, options_as_string: true },
+      options_as_string: true },
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
     /*
      * OCTAVES, declared as octaves.
