@@ -222,8 +222,10 @@ import { register } from "node:module";
 register("./hooks.mjs", import.meta.url);
 
 import { TB3PO_PARAMS, PAGE_PATTERN, ringFor } from "../src/params.mjs";
-import { buildMetaIndex }
-    from "/data/UserData/schwung/shared/param_pages/param_meta.mjs";
+/* Dynamic, not static: see the note in Task 4. params.mjs itself is pure data
+ * with no device imports, so it may stay static. */
+const { buildMetaIndex } =
+    await import("/data/UserData/schwung/shared/param_pages/param_meta.mjs");
 
 let bad = 0;
 const fail = (m) => { console.error("FAIL " + m); bad++; };
@@ -599,12 +601,20 @@ register("./hooks.mjs", import.meta.url);
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/*
+ * EVERYTHING that reaches a device path must be loaded with `await import()`
+ * AFTER register(). Node resolves a module's STATIC imports at link time —
+ * before any of its own top-level code runs — so a static import of a device
+ * path (or of a src module that itself imports one) fails with
+ * ERR_MODULE_NOT_FOUND no matter where register() sits in the file.
+ */
 const { createFramebuffer, drawContext } =
     await import(path.resolve(HERE, "../../schwung/tools/param-pages/harness.mjs"));
-import { fontWidth4x5 }
-    from "/data/UserData/schwung/shared/param_pages/font4x5.mjs";
-import { drawPadsPage, drawKeysPage, ACTION_LABELS, KEY_ROWS, CELL_W, COL_X, KEY_W }
-    from "../src/pad_map.mjs";
+const { fontWidth4x5 } =
+    await import("/data/UserData/schwung/shared/param_pages/font4x5.mjs");
+const { drawPadsPage, drawKeysPage, ACTION_LABELS, KEY_ROWS, CELL_W, COL_X, KEY_W } =
+    await import("../src/pad_map.mjs");
 
 let bad = 0;
 const fail = (m) => { console.error("FAIL " + m); bad++; };
@@ -820,11 +830,21 @@ register("./hooks.mjs", import.meta.url);
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/*
+ * EVERYTHING that reaches a device path must be loaded with `await import()`
+ * AFTER register(). Node resolves a module's STATIC imports at link time —
+ * before any of its own top-level code runs — so a static import of a device
+ * path (or of a src module that itself imports one) fails with
+ * ERR_MODULE_NOT_FOUND no matter where register() sits in the file.
+ */
 const { createFramebuffer, drawContext } =
     await import(path.resolve(HERE, "../../schwung/tools/param-pages/harness.mjs"));
-import { drawPage } from "../src/pages.mjs";
-import { ringFor, PAGE_PATTERN } from "../src/params.mjs";
-import { REST, NOTE, ACCENT, SLIDE } from "../src/lane.mjs";
+/* pages.mjs imports the shared library by device path, so it too must come
+ * in dynamically — the transitive import is resolved at the same link time. */
+const { drawPage } = await import("../src/pages.mjs");
+const { ringFor, PAGE_PATTERN } = await import("../src/params.mjs");
+const { REST, NOTE, ACCENT, SLIDE } = await import("../src/lane.mjs");
 
 let bad = 0;
 const fail = (m) => { console.error("FAIL " + m); bad++; };
