@@ -9,7 +9,7 @@ register("./hooks.mjs", import.meta.url);
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const harness = await import(
@@ -17,15 +17,24 @@ const harness = await import(
 
 const SNAP_DIR = path.join(HERE, "snapshots");
 const UPDATE = process.argv.includes("--update");
+const STRICT = process.env.TB3PO_SNAPSHOTS_STRICT === "1";
 
 let failures = 0;
 let rendered = 0;
+let created = 0;
 
 export function renderCase(name, draw) {
     const fb = harness.createFramebuffer();
     const ctx = harness.drawContext(fb);
     fb.clearScreen();
-    draw(fb, ctx);
+
+    try {
+        draw(fb, ctx);
+    } catch (err) {
+        console.error("FAIL " + name + ": threw " + (err && err.message ? err.message : err));
+        failures++;
+        return;
+    }
     rendered++;
 
     if (fb.clipped() !== 0) {
@@ -40,8 +49,18 @@ export function renderCase(name, draw) {
 
     const snapPath = path.join(SNAP_DIR, name + ".txt");
     const blocks = fb.toBlocks();
-    if (UPDATE || !fs.existsSync(snapPath)) {
+    const exists = fs.existsSync(snapPath);
+    if (UPDATE) {
         fs.writeFileSync(snapPath, blocks);
+    } else if (!exists) {
+        if (STRICT) {
+            console.error("FAIL " + name + ": no snapshot baseline and TB3PO_SNAPSHOTS_STRICT=1");
+            failures++;
+        } else {
+            fs.writeFileSync(snapPath, blocks);
+            console.log("NEW baseline " + name + " — review tests/snapshots/" + name + ".png before committing");
+            created++;
+        }
     } else if (fs.readFileSync(snapPath, "utf8") !== blocks) {
         console.error("FAIL " + name + ": snapshot differs — rerun with --update if intended");
         failures++;
@@ -50,10 +69,21 @@ export function renderCase(name, draw) {
 }
 
 export async function main(cases) {
+    failures = 0;
+    rendered = 0;
+    created = 0;
     for (const [name, draw] of cases) renderCase(name, draw);
-    console.log("harness ok — " + rendered + " pages");
-    if (failures) { console.error(failures + " failure(s)"); process.exit(1); }
+    if (failures === 0) {
+        console.log("harness ok — " + rendered + " pages");
+    } else {
+        console.log("rendered " + rendered + " pages");
+        console.error(failures + " failure(s)");
+    }
+    return failures;
 }
 
 /* No cases yet — Task 6 supplies them. */
-if (process.argv[1] && process.argv[1].endsWith("render.mjs")) await main([]);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    const failCount = await main([]);
+    if (failCount) process.exit(1);
+}
