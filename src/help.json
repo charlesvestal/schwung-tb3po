@@ -243,7 +243,7 @@
         "Back            close",
         "an open option list",
         "first; otherwise hide",
-        "TB-3PO and keep both",
+        "TB-Steps and keep both",
         "slots sequencing in",
         "the background.",
         "",
@@ -271,7 +271,7 @@
         "project BPM by",
         "itself.",
         "",
-        "TB-3PO follows Move's",
+        "TB-Steps follows Move's",
         "transport. Start",
         "rewinds both slots to",
         "step 1, Continue",
@@ -291,7 +291,7 @@
       "lines": [
         "Algorithm: djphazer /",
         "Hemisphere Suite",
-        "(TB_3PO applet)",
+        "(TB_Steps applet)",
         "",
         "Schwung port: Charles",
         "Vestal -- GPL-3.0"

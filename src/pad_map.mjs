@@ -89,8 +89,8 @@ export const KEY_W = 26;
 export const KEY_ROWS = [
     [["+ -", "octave"],   ["< >", "step pg"]],
     [["shf+x", "clear"],  ["undo", "last op"]],
-    [["t1 t2", "slot a - 3po / 303"]],
-    [["t3 t4", "slot b - 3po / 303"]],
+    [["t1 t2", "slot a - steps / 303"]],
+    [["t3 t4", "slot b - steps / 303"]],
     [["step", "pages"],   ["play", "start"]],
 ];
 
