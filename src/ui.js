@@ -547,9 +547,9 @@ function uiGetParam(key) {
         case "root":    return String(slot.root | 0);
         case "scale":   return String(slot.scale | 0);
         /* The option TEXT, which is this enum's wire value. */
-        case "length":  return (slot.length | 0) + " Steps";
+        case "length":  return String(slot.length | 0);
         case "octaves": return String(slot.octaves | 0);
-        case "channel": return "Ch " + (slot.channel | 0);
+        case "channel": return String(slot.channel | 0);
         case "direction": return String(slot.direction | 0);
         /* The option TEXT: the DSP speaks semitones, the cell speaks octaves. */
         case "transpose": {
