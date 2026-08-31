@@ -56,7 +56,8 @@ import { normalizedOf }
 import { drawPage, PERFORM_KNOBS } from './pages.mjs';
 /* ROOT_NAMES and SCALE_NAMES are no longer imported: the grid formats
  * an enum from its DECLARED options, so the names live in one place. */
-import { pagesFor, hierarchyFor, controllerPageFor, TB3PO_PARAMS, DIRECTIONS }
+import { pagesFor, hierarchyFor, controllerPageFor, TB3PO_PARAMS, DIRECTIONS,
+         TRANSPOSE_SEMIS, TRANSPOSE_OPTIONS }
     from './params.mjs';
 
 //
@@ -550,7 +551,11 @@ function uiGetParam(key) {
         case "octaves": return String(slot.octaves | 0);
         case "channel": return "Ch " + (slot.channel | 0);
         case "direction": return String(slot.direction | 0);
-        case "transpose": return String(slot.transpose | 0);
+        /* The option TEXT: the DSP speaks semitones, the cell speaks octaves. */
+        case "transpose": {
+            const i = TRANSPOSE_SEMIS.indexOf(clamp(slot.transpose | 0, -48, 48));
+            return TRANSPOSE_OPTIONS[i < 0 ? 4 : i];
+        }
         /* A READOUT. 1-based, because the pads and the overlays count banks
          * from 1 and the cell must agree with them. */
         case "current_bank": return String((slot.currentBank | 0) + 1);
@@ -588,11 +593,16 @@ function uiSetParam(key, val) {
             slot[key] = Math.round(num);
             setDspParam(slotKey(key), String(slot[key]));
             break;
-        case "transpose":
-            if (!isFinite(num)) return;
-            slot.transpose = clamp(Math.round(num), -48, 48);
+        case "transpose": {
+            /* Back to semitones. The wire value is the option text ("-2 oct"),
+             * so the index is where that text sits, not a number in it --
+             * firstInt would read "-2" and then have to know it meant octaves. */
+            const i = TRANSPOSE_OPTIONS.indexOf(String(val));
+            if (i < 0) return;
+            slot.transpose = TRANSPOSE_SEMIS[i];
             setDspParam(slotKey("transpose"), String(slot.transpose));
             break;
+        }
         case "length": {
             /* The step COUNT out of "16 Steps" -- see uiGetParam and firstInt. */
             const n = firstInt(val);

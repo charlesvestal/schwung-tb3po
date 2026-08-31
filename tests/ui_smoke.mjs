@@ -317,7 +317,11 @@ untouch(0);
 
 /*
  * A NON-divable key refuses. 303.cutoff is an int 0..127 -- a list of 128 is
- * not a picker -- and transpose is an int -48..48.
+ * not a picker.
+ *
+ * This used transpose as its second example until transpose became an enum of
+ * octaves; the knob is on the 303 page now, which is where the plain ints
+ * actually live.
  *
  * TWO REDUNDANT BARRIERS, and neither is individually mutation-covered on
  * today's contract, so this says so rather than implying otherwise. openPicker
@@ -337,10 +341,32 @@ if (ui.__test.pageIndex[0] < 0) ui.__test.showPage(setupIdx);
     const cutMeta = ui.__test.metaFor("303.cutoff");
     check("303.cutoff is NOT divable", !META_isDivable(cutMeta));
 }
-ui.__test.showPage(setupIdx);
-touch(2);                            /* Setup knob 3 = transpose, an int */
+{
+    /* The channel test above leaves its picker open; a second click is how it
+     * closes, and a leaked layer would make everything below it meaningless. */
+    if (ui.__test.picker()) click();
+    check("the channel picker closed before this block", ui.__test.picker() === null);
+    /* Pattern knob 8 = octaves, an int 1..3. Deliberately NOT 303.cutoff:
+     * this stub has no 303 plugin, so that page is absent from the set and a
+     * touch meant for it lands on whatever page is showing instead -- which
+     * is how this assertion first passed against Setup's channel. */
+    ui.__test.showPage(r.findIndex((p) => p.name === "Pattern"));
+    touch(7);
+    click();
+    check("holding a plain int and clicking opens nothing", ui.__test.picker() === null);
+    untouch(7);
+    ui.__test.showPage(setupIdx);
+}
+
+/* And transpose, now an enum of octaves, DOES open -- the same click on the
+ * same physical knob, which is the point of declaring it in the unit its
+ * label promises. */
+touch(2);
 click();
-check("holding a plain int and clicking opens nothing", ui.__test.picker() === null);
+check("transpose opens a picker of octaves", !!ui.__test.picker());
+eq("...listing nine", ui.__test.picker() && ui.__test.picker().options.length, 9);
+eq("...labelled in octaves", ui.__test.picker() && ui.__test.picker().options[4], "0 oct");
+if (ui.__test.picker()) click();
 untouch(2);
 
 /* A READOUT refuses, and for its own reason: `divable` excludes read-only by

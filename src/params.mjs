@@ -17,6 +17,10 @@
 export const ROOT_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 export const SCALE_NAMES = ["Minor", "Phrygian", "HarmMinor", "MinPent", "Dorian", "Major"];
 export const LENGTHS = [8, 16, 24, 32];
+/* Semitones for each `transpose` option index. The DSP speaks semitones. */
+export const TRANSPOSE_SEMIS = [-48, -36, -24, -12, 0, 12, 24, 36, 48];
+export const TRANSPOSE_OPTIONS = ["-4 oct", "-3 oct", "-2 oct", "-1 oct", "0 oct",
+                                  "+1 oct", "+2 oct", "+3 oct", "+4 oct"];
 export const DIRECTIONS = ["Fwd", "Rev", "Ping", "Rnd"];
 /*
  * MIDI channels as an ENUM, for the same reason `length` is one.
@@ -127,7 +131,28 @@ export const TB3PO_PARAMS = [
     { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "enum", options: CHANNELS,
       short_options: CHANNEL_SHORT, options_as_string: true },
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
-    { key: "transpose", label: "Transpose", short_name: "Oct+", type: "int",  min: -48, max: 48, step: 12 },
+    /*
+     * OCTAVES, declared as octaves.
+     *
+     * The DSP stores SEMITONES and clamps to +/-48 (tb3po.c:841), and the +/-
+     * buttons have always stepped by 12 -- so the range is four octaves either
+     * way and that is not new. What was wrong is that the cell said `OCT+` and
+     * showed `-48`: a label promising octaves over a number counting
+     * semitones. Turning it read -12, -24, -36, -48.
+     *
+     * Declared as an enum, the cell shows what the label claims, and the value
+     * becomes divable -- nine options is a list worth opening. The index maps
+     * to semitones as (index - 4) * 12; see TRANSPOSE_SEMIS.
+     *
+     * No option is a bare numeral, "0 oct" included. That is deliberate: an
+     * enum whose option text can read as a decimal is written wrong by the
+     * host's formatParamForSet (schwung#376) -- index 0 would resolve as the
+     * position of the option named "0". Once that lands this could be "0",
+     * but it reads better as "0 oct" anyway.
+     */
+    { key: "transpose", label: "Transpose", short_name: "Oct", type: "enum",
+      options: TRANSPOSE_OPTIONS,
+      short_options: ["-4", "-3", "-2", "-1", "0", "+1", "+2", "+3", "+4"] },
     /*
      * A READOUT, not a control: `access: "read"`.
      *
