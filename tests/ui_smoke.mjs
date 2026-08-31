@@ -168,7 +168,7 @@ check("length declares options_as_string", !!lenMeta.options_as_string,
       "meta was " + JSON.stringify(lenMeta));
 ui.__test.showPage(patternIdx);
 ui.__test.ui.slots[0].length = 16;
-eq("length reads its step COUNT", ui.__test.getParam("length"), "16 Steps");
+eq("length reads its step COUNT", ui.__test.getParam("length"), "16");
 writes.length = 0;
 for (let i = 0; i < 30; i++) knob(6, +3);        /* Pattern knob 7 = length */
 flush();
@@ -189,7 +189,7 @@ check("channel is DIVABLE", META_isDivable(chMeta),
 ui.__test.showPage(setupIdx);
 ui.__test.ui.slots[0].channel = 10;
 ui.__test.noteExternalChange("channel");
-eq("channel reads its channel NUMBER", ui.__test.getParam("channel"), "Ch 10");
+eq("channel reads its channel NUMBER", ui.__test.getParam("channel"), "10");
 writes.length = 0;
 for (let i = 0; i < 20; i++) knob(0, +3);
 flush();
@@ -421,13 +421,13 @@ ui.__test.ui.slots[1].channel = 12;
 ui.__test.ui.activeSlot = 0;
 ui.__test.showPage(setupIdx);
 ui.__test.ctl.state.values.channel = ui.__test.getParam("channel");
-eq("slot A shows its own channel", ui.__test.ctl.state.values.channel, "Ch 3");
+eq("slot A shows its own channel", ui.__test.ctl.state.values.channel, "3");
 midi(0xB0, 41, 127);                 /* Track 3 = slot B, Pattern */
 eq("...and T3 switched to slot B", ui.__test.ui.activeSlot, 1);
 eq("the grid followed the slot, not the key",
-   ui.__test.ctl.state.values.channel, "Ch 12");
+   ui.__test.ctl.state.values.channel, "12");
 midi(0xB0, 43, 127);                 /* Track 1 = back to slot A */
-eq("...and back again", ui.__test.ctl.state.values.channel, "Ch 3");
+eq("...and back again", ui.__test.ctl.state.values.channel, "3");
 
 /* ------------------------------------------------- the 303 page appears
  *
@@ -530,7 +530,7 @@ for (const idx of r.keys()) {
      */
     printed.length = 0;
     globalThis.tick();
-    const rows = ["Ch 1", "Ch 2", "Ch 3"].filter((o) => printed.indexOf(o) >= 0);
+    const rows = ["1", "2", "3"].filter((o) => printed.indexOf(o) >= 0);
     check("...and the frame DRAWS its option list", rows.length === 3,
           "printed " + JSON.stringify(printed));
 
@@ -540,7 +540,7 @@ for (const idx of r.keys()) {
     printed.length = 0;
     globalThis.tick();
     check("...and nothing draws it once it is down",
-          ["Ch 1", "Ch 2", "Ch 3"].filter((o) => printed.indexOf(o) >= 0).length < 3,
+          ["1", "2", "3"].filter((o) => printed.indexOf(o) >= 0).length < 3,
           "printed " + JSON.stringify(printed));
 }
 
