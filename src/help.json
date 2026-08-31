@@ -240,7 +240,9 @@
         {
             "title": "Suspend & exit",
             "lines": [
-                "Back            hide",
+                "Back            close",
+                "an open option list",
+                "first; otherwise hide",
                 "TB-3PO and keep both",
                 "slots sequencing in",
                 "the background.",

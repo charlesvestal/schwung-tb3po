@@ -34,6 +34,25 @@ import { createController, LAYOUT_MOVY }
 import { decodeInput, applyInput }
     from '/data/UserData/schwung/shared/param_pages/page_input.mjs';
 import { drawEnumList } from '/data/UserData/schwung/shared/param_pages/enum_list.mjs';
+/*
+ * A KNOB IS NOT A JOG, and a list has to be told which one is turning it.
+ *
+ * The shadow UI routes a knob turn into an open option list through this
+ * accumulator rather than 1:1 (shadow_ui.js, VIEWS.ENUM_PICKER): "1:1 is right
+ * for the jog and much too fast for a knob". A jog detent is a click you feel;
+ * a knob detent is a fraction of a casual twist and there are dozens in one
+ * flick. Same module, same feel, same test (schwung tests/host/test_list_knob.sh).
+ */
+import { listKnobInit, listKnobStep }
+    from '/data/UserData/schwung/shared/param_pages/list_knob.mjs';
+/*
+ * The eight indicator rings, from the values the controller is already holding
+ * -- so they cost no read. See updateKnobRingLeds.
+ */
+import { updateKnobLEDs, clearKnobLEDs, resetKnobLedCache, NUM_KNOB_LEDS }
+    from '/data/UserData/schwung/shared/param_pages/knob_leds.mjs';
+import { normalizedOf }
+    from '/data/UserData/schwung/shared/param_pages/render_page_movy.mjs';
 import { drawPage, PERFORM_KNOBS } from './pages.mjs';
 /* ROOT_NAMES and SCALE_NAMES are no longer imported: the grid formats
  * an enum from its DECLARED options, so the names live in one place. */
@@ -187,6 +206,64 @@ function hierarchyJsonFor(has303) {
     return hierarchyJson;
 }
 
+/*
+ * THE WHOLE BINDING, AND WHAT TB-3PO DECLINES OF IT.
+ *
+ * The controller is only half of what the shadow UI does with a knob grid. The
+ * other half is a set of responsibilities the HOST discharges around it -- it
+ * draws things the controller only computes, and routes input the controller
+ * does not claim (schwung-movy-embed's schwung-page.ts calls it "routing, one
+ * tick, one render"). Adopting the state and not the binding is how three
+ * device-reported defects arrived at once: no peek, a dead knob in the picker,
+ * and a Back that left the module. So the list is written down.
+ *
+ * CARRIED (each at its own site, named here so a missing one is findable):
+ *   render body      drawPage -> ctl.render with rect + bands   (pages.mjs)
+ *   one tick         ctl.tick() -- the staggered read cursor    (tick)
+ *   enum peek        ctl.enumPeek() drawn over the page         (draw)
+ *   option picker    ctl.onClick -> takePending -> drawEnumList (openPickerFrom)
+ *   knob in picker   listKnobStep, not 1:1                      (pickerKnob)
+ *   Back as layers   hint / peek / picker / park                (handleBack)
+ *   knob rings       updateKnobLEDs from cached values          (refreshLeds)
+ *   external edits   values + knob engine re-seeded             (noteExternalChange)
+ *   contract reshape ctl.reloadIfChanged when a 303 arrives     (pollDsp)
+ *   held readout     movyHeaderFor, since bands.header is off   (pages.mjs)
+ *   dive promise     CLK OPEN in the footer while held          (pages.mjs)
+ *
+ * DECLINED, each for a reason that is about THIS module and not about effort:
+ *
+ *   announce()       No screen-reader path of its own. Announcing into nothing
+ *                    is better than a second announcer disagreeing with the
+ *                    host's -- see the injected no-op below.
+ *   section picker   Shift+Click opens the CONTROLLER's page list: three
+ *                    entries under a bank bar showing six. TB-3PO's page jumps
+ *                    are the track buttons and the step buttons.
+ *   opaque editors   `openParamEditor` hands a filepath / canvas / string to a
+ *                    screen that only exists inside the hierarchy editor.
+ *                    TB-3PO declares no such param and has no editor to open.
+ *   isModulated()    Nothing modulates these params: there is no LFO or
+ *                    modulation matrix pointed at a tool's own contract, so the
+ *                    tick would be drawn for a state that cannot occur.
+ *   trailing pages   My Presets and Module are appended for a chain COMPONENT.
+ *                    TB-3PO is not one -- it is the tool -- and it has its own
+ *                    eight pattern banks on the pad row.
+ *   contract retry   The tri-state exists because a read can time out on the
+ *                    wire. Every read here is a local field, so `null` is
+ *                    unreachable by construction and `contractUnresolved` can
+ *                    never be true; a "Loading..." hold frame would be dead
+ *                    code guarding an impossible state. (uiGetParam answers ""
+ *                    for an unknown key, never null, deliberately.)
+ *   is_loading poll  Same: the contract's shape changes only when a 303 arrives
+ *                    or leaves, which pollDsp already watches, and TB-3PO
+ *                    serves its own hierarchy synchronously.
+ *   restorePage      The host re-enters a view and has to find its way back to
+ *                    a page. TB-3PO never leaves: the controller is parked by
+ *                    syncController from an index TB-3PO owns.
+ *   knob-LED restore The host gives Move's rings back on exit
+ *                    (shadow_restore_knob_leds). Overtake teardown already
+ *                    replays Move's LED snapshot for the whole surface, which
+ *                    is the same restore by another route.
+ */
 const ctl = createController({
     getParam: (fullKey) => uiGetParam(bareKey(fullKey)),
     setParam: (fullKey, val) => { uiSetParam(bareKey(fullKey), val); },
@@ -681,16 +758,15 @@ export function keyForKnob(idx) {
  * screen. Hence drawEnumList rather than a local drawMenuList call: "a second
  * list widget is how Master FX and the chain editor drifted apart".
  *
- * WHAT IS DIFFERENT HERE, and it is not a design choice: THERE IS NO CANCEL.
+ * BACK CANCELS, which it could not do until TB-3PO took Back over.
  *
- * shadow_ui.js claims a plain Back press for every `suspend_keeps_js` overtake
- * module (this one) and turns it into suspendOvertakeMode() BEFORE the forward
- * to onMidiMessageInternal -- the module only ever sees the RELEASE edge, which
- * is why the CC_BACK case below has always been a comment and a `return`. So a
- * Back that cancelled the picker would be a Back that also parked the tool, and
- * inventing some other cancel key would be a gesture fighting the host for no
- * gain. A second jog click commits; nothing cancels. The footer says exactly
- * that (JOG SEL / CLK SET) and never advertises a BACK EXIT it cannot honour.
+ * shadow_ui.js used to claim every plain Back press from this module and turn
+ * it into suspendOvertakeMode() BEFORE the forward to onMidiMessageInternal, so
+ * the module only ever saw the RELEASE edge -- and a picker with no cancel was
+ * the honest consequence, not a design choice. `suspend_self_managed` (see
+ * handleBack) hands the press back, so the picker gets the same three-pair
+ * footer the host's own does (enumPickerFooterHints: JOG SEL / CLK SET /
+ * BACK EXIT) and Back means what it means everywhere else on the device.
  *
  * Nothing is written while you scroll -- the commit is one commitEnum at
  * close -- so the `*` mark still means "the value that is live", and moving off
@@ -728,7 +804,22 @@ function openPickerFrom(pending) {
         index: live,
         /* The value that is LIVE, i.e. what the `*` marks. */
         openIndex: live,
+        /* Per OPENING, so the banked partial turn of the last one cannot spend
+         * itself on this list. */
+        knob: listKnobInit(),
     };
+    /*
+     * A PEEK UNDER A PICKER WOULD INVERT THE BACK LADDER.
+     *
+     * The peek is raised by the detent that precedes the click, so it is very
+     * often still live at the moment the picker opens -- and the picker draws
+     * over it (draw() returns before the peek), so Back would take down a panel
+     * that is not on screen while the list you ARE looking at stayed up. Layers
+     * have to be drawn and dismissed in the same order; the peek stops being a
+     * layer here. Same reasoning as the host dropping the held touch before it
+     * hands a knob off (clearParamPagesTouch).
+     */
+    if (ctl.dismissPeek) ctl.dismissPeek();
     return true;
 }
 
@@ -739,6 +830,32 @@ function openPickerFrom(pending) {
 function pickerJog(delta) {
     if (!picker || delta === 0) return;
     picker.index = clamp(picker.index + delta, 0, picker.options.length - 1);
+}
+
+/*
+ * ...AND THE KNOB SCROLLS IT TOO, through the list accumulator.
+ *
+ * You reach this list by HOLDING a knob and clicking, so the hand is already
+ * on the knob and the reflex is to keep turning it -- reported on the shadow
+ * UI as "I keep trying to keep turning it", and fixed there by routing the
+ * turn into the open list (shadow_ui.js, VIEWS.ENUM_PICKER). Any knob, not
+ * just the one that opened it: the list is full-screen, so there is no other
+ * visible control a turn could mean, and requiring the right one would leave
+ * its neighbours silently dead.
+ *
+ * NOT 1:1 like the jog above. `listKnobStep` costs several detents per entry
+ * on a deliberate turn and accelerates on a fast one, but only as far as the
+ * list is long -- a 4-option Direction never accelerates at all. Without it a
+ * flick of the wrist crosses the whole list.
+ *
+ * It is a FIX as well as an affordance: before this the turn fell through to
+ * the block below and edited the param BEHIND the list, invisibly, so a Back
+ * that now cancels would be cancelling a write that had already happened.
+ */
+function pickerKnob(delta) {
+    if (!picker || delta === 0) return;
+    const step = listKnobStep(picker.knob, delta, Date.now(), picker.options.length);
+    if (step) pickerJog(step);
 }
 
 /*
@@ -756,6 +873,47 @@ function closePicker(commit) {
     const p = picker;
     picker = null;
     if (commit) ctl.commitEnum(p.key, p.index);
+}
+
+/*
+ * BACK IS A LADDER, AND TB-3PO OWNS IT.
+ *
+ * `capabilities.suspend_self_managed` in module.json is what makes this
+ * handler reachable at all. Without it shadow_ui.js turns a plain Back into
+ * suspendOvertakeMode() BEFORE the forward to onMidiMessageInternal
+ * (shadow_ui.js:21418), so the module saw only the release edge -- and a Back
+ * pressed while the enum peek was up parked the whole tool. That is the same
+ * report the host had against itself ("if i hit back during autopeek it exits
+ * the module"), fixed there in page_input.mjs's `back` case, and until now
+ * unreachable from here because the press never arrived.
+ *
+ * Opting in changes exactly two things, both in shadow_ui.js: the capability
+ * IMPLIES suspend_keeps_js (:7045 -- the closure has to stay alive to keep
+ * deciding), and plain Back falls through to us (:21429). Shift+Back is still
+ * the host's universal FULL EXIT and Shift+Vol+JogClick still leaves overtake;
+ * both are decided above us and neither reaches this function. Nothing else in
+ * the suspend path branches on it: the flag is simply carried on the parked
+ * entry and restored on resume (:6484, :6587).
+ *
+ * So the last rung is the park the host used to perform for us, by the one
+ * binding it exposes for it -- `host_suspend_overtake()`, which is what movy
+ * (the only other self-managed module) calls. The order is `decodeInput`'s,
+ * one layer at a time: hint, peek, picker, then leave.
+ */
+function handleBack() {
+    /* TB-3PO arms no first-run hint today. Kept so the ladder is the shared
+     * one rather than a subset of it that has to be noticed later. */
+    if (ctl.dismissHint && ctl.dismissHint()) return;
+    if (ctl.dismissPeek && ctl.dismissPeek()) return;
+    /* Cancel, not commit: nothing has been written while you scrolled. */
+    if (pickerIsOpen()) { closePicker(false); return; }
+    /*
+     * Guarded. A host predating the capability never routes Back here (it
+     * suspends before we see it), so the only way to arrive with no binding is
+     * a host that changed its mind mid-session -- and doing nothing is better
+     * than throwing inside a callback the SPI thread feeds.
+     */
+    if (typeof host_suspend_overtake === "function") host_suspend_overtake();
 }
 
 // Slot that currently hosts the 303 plugin. Refreshed on 303-mode entry and
@@ -1084,8 +1242,49 @@ function refreshLeds() {
     setTrackLed(CC_DELETE, LED_WHITE);                     // X  CLEAR (Shift+X to confirm)
     setTrackLed(CC_UNDO,   LED_DARK_GREY);                 // Undo last op
 
+    /*
+     * THE EIGHT INDICATOR RINGS (CC 71-78).
+     *
+     * The other half of the grid's own feedback, and the last thing TB-3PO was
+     * missing from the host's tick: nothing on this screen says which physical
+     * encoder drives which drawn cell, so the LEDs do -- knobs 1-4 white, 5-8
+     * amber, brightness following the value, dark meaning "turning this does
+     * nothing". Same shared module the shadow UI uses on a knob page and the
+     * same one movy drives from overtake, so the colour ramps cannot drift.
+     *
+     * It costs no IPC: every value comes out of the cache the grid is already
+     * rendering from. Reading eight params here would be ~22ms against a 16ms
+     * frame -- it would halve the frame rate of the screen it decorates.
+     *
+     * `resetKnobLedCache` on a forced refresh because knob_leds keeps its OWN
+     * diff cache (it writes with force=true, bypassing input_filter's), so the
+     * periodic repaint above would otherwise skip the rings -- exactly the
+     * drift that repaint exists to correct.
+     */
+    if (ledForceNextRefresh) resetKnobLedCache();
+    updateKnobRingLeds();
+
     // Clear the force-refresh flag now that all LEDs have been written.
     ledForceNextRefresh = false;
+}
+
+function updateKnobRingLeds() {
+    const p = ctl.page;
+    const keys = (p && Array.isArray(p.keys)) ? p.keys : null;
+    /* No plan yet, or a page the controller does not own: an unlit ring is the
+     * honest reading of a knob that will do nothing. `knobLive` is the same
+     * gate the TURN and the header readout use, so PERFORM lights the four it
+     * draws and Pads/Keys light none. */
+    if (!keys || !ctl.metaIndex) { clearKnobLEDs(); return; }
+    const norm = new Array(NUM_KNOB_LEDS).fill(null);
+    for (let i = 0; i < NUM_KNOB_LEDS; i++) {
+        const key = knobLive(i) ? keys[i] : null;
+        if (!key) continue;
+        /* normalizedOf answers null for an unread value, which lights nothing
+         * rather than a knob sitting confidently at the bottom of its range. */
+        norm[i] = normalizedOf(ctl.metaIndex.getOrGuess(key), ctl.state.values[key]);
+    }
+    updateKnobLEDs(norm);
 }
 
 // -------- Display ----------
@@ -1112,9 +1311,10 @@ function draw() {
             options: picker.options,
             index: picker.index,
             markIndex: picker.openIndex,
-            /* No BACK EXIT pair -- see the picker's own note. The click is the
-             * only way out and the footer must not promise a second one. */
-            footer: [["JOG", "SEL"], ["CLK", "SET"]],
+            /* The host's own three pairs, verbatim (enumPickerFooterHints):
+             * BACK is EXIT by the footer canon, and TB-3PO can honour it now
+             * that it owns the press -- see handleBack. */
+            footer: [["JOG", "SEL"], ["CLK", "SET"], ["BACK", "EXIT"]],
         });
         return;
     }
@@ -1145,6 +1345,40 @@ function draw() {
     });
     // Overlay last so it sits on top of whatever the page drew.
     drawOverlay();
+
+    /*
+     * THE ENUM PEEK, over everything.
+     *
+     * The controller RAISES it and does not draw it: `enumPeek()` returns
+     * { title, options, index } while a divable enum is being turned and the
+     * HOST is expected to put it on screen (shadow_ui_param_pages.mjs, after
+     * its own controller.render). TB-3PO adopted the controller's state without
+     * this half of the binding, so turning MIDI Ch or Direction on the grid
+     * showed a 30px cell and nothing else -- the one thing the peek exists for.
+     *
+     * The SAME drawing path as the picker above, deliberately: enum_list.mjs is
+     * shared between the two "so the only difference is the header word", and
+     * that word is the whole of the difference here too. TURNING, not SELECT --
+     * the detent has ALREADY written, so nothing is being selected and naming a
+     * gesture the screen does not have teaches a button that does nothing. For
+     * the same reason `markIndex` is the cursor itself (there is no earlier
+     * value to return to) and the footer is the single pair TURN SET.
+     *
+     * AFTER the page and over it, again as the host does: a frame in which the
+     * peek expires then falls back to a complete page rather than to a hole.
+     */
+    const peek = ctl.enumPeek();
+    if (peek) {
+        clear_screen();
+        drawEnumList(ctx, {
+            title: peek.title,
+            headerRight: "TURNING",
+            options: peek.options,
+            index: peek.index,
+            markIndex: peek.index,
+            footer: [["TURN", "SET"]],
+        });
+    }
 }
 
 // -------- Lifecycle ----------
@@ -1177,7 +1411,19 @@ globalThis.init = function() {
     setDspParam("b.channel", String(ui.slots[1].channel));
     // First-load nudge — call out the four-button slot/mode scheme so the
     // user understands two slots (A/B) run in parallel on separate channels.
-    showOverlay("Slots A+B", "T1/T2 A, T3/T4 B", 360);
+    /*
+     * SHORT ENOUGH TO SURVIVE THE BOX.
+     *
+     * drawOverlay prints "Value: <text>" at a fixed x inside a 120px frame and
+     * the device DISCARDS what runs past the screen edge, silently -- so
+     * "T1/T2 A, T3/T4 B" was drawn 20 pixels wide of it and read as
+     * "T1/T2 A, T3/T4" on hardware. Found by the render harness, which counts
+     * off-screen pixels, once a case put a real frame with this overlay up
+     * through it; the two other over-long strings ("Shift+X to confirm",
+     * "last pattern op") are shortened for the same reason. Anything here has
+     * to measure under ~115px with the "Value: " prefix in front of it.
+     */
+    showOverlay("Slots A+B", "T1T2=A T3T4=B", 360);
 
 };
 
@@ -1237,8 +1483,16 @@ globalThis.onMidiMessageInternal = function(data) {
         shiftHeld = (d2 > 0);
         return;
     }
+    /*
+     * BACK, and it must sit ABOVE the picker block below.
+     *
+     * The draw path puts the peek LAST and the picker over the page, so the
+     * input path has to feed them FIRST -- the two orders are the reverse of
+     * each other, which is the shadow UI's own rule and the reason its input
+     * handler is a run of early-outs. `handleBack` is the ladder itself.
+     */
     if (type === 0xB0 && d1 === CC_BACK) {
-        // Host intercepts Back for suspend/exit. Release may leak through; ignore.
+        if (d2 > 0) handleBack();
         return;
     }
 
@@ -1258,6 +1512,11 @@ globalThis.onMidiMessageInternal = function(data) {
      */
     if (pickerIsOpen()) {
         if (type === 0xB0 && d1 === 14) { pickerJog(decodeDelta(d2)); return; }
+        /* The hand is still on the knob that opened it -- see pickerKnob. */
+        if (type === 0xB0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
+            pickerKnob(decodeDelta(d2));
+            return;
+        }
         if (type === 0xB0 && d1 === CC_JOG_CLICK && d2 > 0) { closePicker(true); return; }
         return;
     }
@@ -1269,7 +1528,7 @@ globalThis.onMidiMessageInternal = function(data) {
             setDspParam(slotKey("clear"), "1");
             showOverlay("Pattern", "cleared");
         } else {
-            showOverlay("Clear", "Shift+X to confirm");
+            showOverlay("Clear", "Shift+X");   /* longer runs off the box -- see init */
         }
         return;
     }
@@ -1277,7 +1536,7 @@ globalThis.onMidiMessageInternal = function(data) {
     // Undo button — restore the pattern before the last NEW / MUTATE / CLEAR.
     if (type === 0xB0 && d1 === CC_UNDO && d2 > 0) {
         setDspParam(slotKey("undo"), "1");
-        showOverlay("Undo", "last pattern op");
+        showOverlay("Undo", "last op");    /* longer runs off the box -- see init */
         return;
     }
 

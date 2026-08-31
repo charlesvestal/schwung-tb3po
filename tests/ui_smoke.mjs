@@ -15,11 +15,22 @@ register("./hooks.mjs", import.meta.url);
 /* Every device binding ui.js or the shared library may touch. `print` is a
  * real global name on the device, not console output. */
 const writes = [];
+/* Every string the last frame printed. The peek and the picker are drawn with
+ * drawEnumList, whose OPTION ROWS go through print() -- so this is how a test
+ * with no framebuffer can tell "the overlay was drawn" from "the overlay was
+ * merely raised". The header band and the footer are font4x5 fillRect glyphs
+ * and cannot be read back at all, which is why the assertions below are about
+ * the list rows. */
+const printed = [];
+const leds = [];
 Object.assign(globalThis, {
-    print: () => {},
+    print: (x, y, text) => { printed.push(String(text)); },
     fill_rect: () => {},
     draw_rect: () => {},
     draw_line: () => {},
+    /* menu_layout's scrollbar draws pixel by pixel, and a list long enough to
+     * need one (Ch 1..16) is exactly what the peek and the picker raise. */
+    set_pixel: () => {},
     text_width: (s) => String(s).length * 6,
     clear_screen: () => {},
     host_module_set_param: (k, v) => { writes.push([k, v]); },
@@ -27,7 +38,9 @@ Object.assign(globalThis, {
     shadow_get_param: () => "",
     /* refreshLeds runs on the same tick as draw(); the shared LED helpers
      * write through this one. */
-    move_midi_internal_send: () => true,
+    /* Every LED packet the frame emitted: [cable/CIN, status, d1, d2]. The
+     * knob rings are CC 71-78 out, the same CCs the encoders come in on. */
+    move_midi_internal_send: (pkt) => { leds.push(Array.from(pkt)); return true; },
     shadow_send_midi_to_dsp: () => {},
 });
 globalThis.console = globalThis.console || { log: () => {} };
@@ -458,6 +471,175 @@ for (const idx of r.keys()) {
           "index " + ui.__test.pageIndex[0]);
 
     ui.__test.pageIndex[0] = 0;
+}
+
+/* ============ THE REST OF THE BINDING ============
+ *
+ * The controller RAISES things it does not draw and REFUSES input it does not
+ * claim; the host draws and routes the rest. TB-3PO adopted the state without
+ * that half, and these are the three defects it cost, each driven through the
+ * real MIDI entry point.
+ */
+
+/* ---------------------------------------------------------- the enum peek */
+{
+    ui.__test.showPage(setupIdx);
+    ui.__test.ctl.clearTouch();
+    ui.__test.ui.slots[0].channel = 1;
+    ui.__test.noteExternalChange("channel");
+
+    /* Setup knob 1 is MIDI Ch: a divable enum of 16, which is what peeks. */
+    knob(0, +4);
+    const peek = ui.__test.ctl.enumPeek();
+    check("turning a divable enum RAISES the peek", !!peek,
+          "enumPeek() was " + JSON.stringify(peek));
+    eq("...on the key that was turned", peek && peek.key, "channel");
+
+    /*
+     * ...AND THE FRAME DRAWS IT. The controller only computes the peek — the
+     * host is what puts it on screen — so "it was raised" is exactly the half
+     * TB-3PO already had. Asserted as THREE consecutive options in one frame:
+     * a single grid cell can print the live value, so one option proves
+     * nothing, and no cell can print a list.
+     */
+    printed.length = 0;
+    globalThis.tick();
+    const rows = ["Ch 1", "Ch 2", "Ch 3"].filter((o) => printed.indexOf(o) >= 0);
+    check("...and the frame DRAWS its option list", rows.length === 3,
+          "printed " + JSON.stringify(printed));
+
+    /* A page with no peek up must not be drawing one — otherwise the check
+     * above would pass on a screen that always showed the list. */
+    ui.__test.ctl.dismissPeek();
+    printed.length = 0;
+    globalThis.tick();
+    check("...and nothing draws it once it is down",
+          ["Ch 1", "Ch 2", "Ch 3"].filter((o) => printed.indexOf(o) >= 0).length < 3,
+          "printed " + JSON.stringify(printed));
+}
+
+/* -------------------------------------------- a knob scrolls the picker */
+{
+    ui.__test.showPage(setupIdx);
+    ui.__test.ctl.clearTouch();
+    ui.__test.ui.slots[0].channel = 1;
+    ui.__test.noteExternalChange("channel");
+    touch(0); click();
+    check("MIDI Ch opens the picker", ui.__test.picker() !== null);
+    eq("...at the live option", ui.__test.picker().index, 0);
+
+    /*
+     * 30 detents, and the answer is 5 — NOT 30, and not 0.
+     *
+     * The hand is still on the knob that opened the list, so a turn has to
+     * reach it (it used to fall through and edit the param BEHIND the list).
+     * Through listKnobStep, though: DETENTS_PER_ENTRY is 6 and a 16-option
+     * list is too short to accelerate, so this pins both halves at once — 0
+     * would mean the knob is dead, 15 (the clamp) would mean 1:1.
+     */
+    writes.length = 0;
+    knob(0, +30);
+    eq("a knob scrolls the picker through the LIST accumulator",
+       ui.__test.picker().index, 5);
+    eq("...and writes nothing while it scrolls", writes.length, 0);
+
+    /* Pads and the jog still behave as they did. */
+    click();
+    check("a click still commits", ui.__test.picker() === null);
+    eq("...the option the knob landed on", ui.__test.ui.slots[0].channel, 6);
+    untouch(0);
+}
+
+/* ------------------------------------------------------- Back is a ladder */
+{
+    /*
+     * THE CAPABILITY IS THE FIX. Without `suspend_self_managed` shadow_ui.js
+     * turns a plain Back into suspendOvertakeMode() before onMidiMessageInternal
+     * runs, so none of the layering below is reachable on hardware however
+     * correct it is here. Asserted against the shipped manifest, not against a
+     * copy of it.
+     */
+    const fs = await import("node:fs");
+    const url = await import("node:url");
+    const path = await import("node:path");
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(fs.readFileSync(path.join(here, "../src/module.json"), "utf8"));
+    check("module.json claims suspend_self_managed",
+          manifest.capabilities && manifest.capabilities.suspend_self_managed === true,
+          "capabilities were " + JSON.stringify(manifest.capabilities));
+
+    let suspends = 0;
+    globalThis.host_suspend_overtake = () => { suspends++; };
+    const back = () => midi(0xB0, 51, 127);
+
+    ui.__test.showPage(setupIdx);
+    ui.__test.ctl.clearTouch();
+
+    /* Layer 1: the peek. This is the reported bug — "if i hit back during
+     * autopeek it exits the module". */
+    knob(0, +4);
+    check("the peek is up", !!ui.__test.ctl.enumPeek());
+    back();
+    check("Back takes the peek down", !ui.__test.ctl.enumPeek());
+    eq("...and does NOT park the tool", suspends, 0);
+
+    /* Layer 2: the picker, cancelled rather than committed. */
+    ui.__test.ctl.clearTouch();
+    ui.__test.ui.slots[0].channel = 4;
+    ui.__test.noteExternalChange("channel");
+    touch(0); click();
+    check("the picker is up", ui.__test.picker() !== null);
+    jog(3);
+    writes.length = 0;
+    back();
+    check("Back closes the picker", ui.__test.picker() === null);
+    eq("...without committing", ui.__test.ui.slots[0].channel, 4);
+    eq("...and still does not park the tool", suspends, 0);
+    untouch(0);
+
+    /* Layer 3: nothing is up, so Back is the park the host used to do for us. */
+    ui.__test.ctl.clearTouch();
+    ui.__test.ctl.dismissPeek();
+    back();
+    eq("Back with no layer up parks the tool", suspends, 1);
+    /* The release edge is not a second press. */
+    midi(0xB0, 51, 0);
+    eq("...once, on the press edge only", suspends, 1);
+}
+
+/* ------------------------------------------------- the knob indicator rings */
+{
+    /* The host lights CC 71-78 from the values the controller already holds,
+     * on a knob page and nowhere else -- nothing on this screen otherwise says
+     * which physical encoder drives which drawn cell. TB-3PO drew the grid and
+     * left the rings dark. */
+    const ringsIn = (frame) => frame.filter((p) => p[2] >= 71 && p[2] <= 78);
+    const lit = (frame) => ringsIn(frame).filter((p) => p[3] !== 0);
+
+    ui.__test.showPage(setupIdx);
+    ui.__test.ctl.clearTouch();
+    /* Two frames: the first emits, the second is suppressed by the diff cache
+     * -- so the assertion is about the FIRST, and the second proves the cache
+     * is doing its job rather than eight packets going out every tick. */
+    leds.length = 0;
+    globalThis.tick();
+    const firstRings = ringsIn(leds);
+    check("a knob page lights the indicator rings", lit(leds).length > 0,
+          "ring packets were " + JSON.stringify(firstRings));
+    leds.length = 0;
+    globalThis.tick();
+    eq("...and an unchanged page re-sends none of them", ringsIn(leds).length, 0);
+
+    /* Pads has no cells, so every ring goes dark -- a lit knob there would say
+     * eight controls do something when none of them does. */
+    ui.__test.showPage(r.findIndex((p) => p.name === "Pads"));
+    leds.length = 0;
+    globalThis.tick();
+    const dark = ringsIn(leds);
+    check("...and Pads darkens every one that was lit",
+          dark.length > 0 && dark.every((p) => p[3] === 0),
+          "ring packets were " + JSON.stringify(dark));
+    ui.__test.showPage(setupIdx);
 }
 
 console.log(failures === 0 ? "ui_smoke: all passed" : "ui_smoke: " + failures + " FAILED");

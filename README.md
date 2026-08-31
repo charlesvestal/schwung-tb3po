@@ -21,7 +21,7 @@ Requires Schwung **v0.9.8 or later** (needs the `suspend_keeps_js` capability).
 1. Open **Tools** (Shift+Vol+Step13) → pick **TB-3PO**.
 2. Set the MIDI channel for slot A on the **CHANNEL** page (Step button 4). Switch to slot B with **T3** and set its channel.
 3. Load synths into shadow slots and set their `receive_channel` to match. For the easiest path, pair with [schwung-303](https://github.com/charlesvestal/schwung-303) on each channel.
-4. **Back** → suspend (both slots keep sequencing while you play Move).
+4. **Back** → close an open list, or suspend (both slots keep sequencing while you play Move).
 5. **Shift+Back** → full exit.
 6. Re-open from Tools menu → resumes with patterns + position intact.
 
@@ -45,6 +45,10 @@ Both slots sequence at all times — the buttons just switch which slot the knob
 3. **SCALE** — jog-edit Root / Scale / Length / Gate (or **303 Control 2** in 303 mode: live K5–K8 readouts)
 4. **CHANNEL** — jog-edit MIDI out channel (1–16) for the active slot
 5. **HELP** — on-screen pad map
+
+### Option lists
+
+Hold a knob whose cell is an enum (MIDI Ch, Direction, Root, Scale, Length) and click the jog: its options open full-screen. The jog **or the knob still under your hand** scrolls, a click sets, **Back cancels**. Simply *turning* such a knob raises the same list for about 0.7 s — a read-out of where you have landed, not a question, so there is nothing to cancel and Back just takes it down.
 
 ## Knobs — 303 mode (CC controller)
 
@@ -95,6 +99,7 @@ On entering 303 mode, knob state syncs from the plugin's current values so the f
 - **Action row** — teal NEW, indigo MUT, orange DIR.
 - **Pages** — green = current page, white = available.
 - **Track buttons** — bright teal = active 3PO, bright orange = active 303; dark grey = inactive; off = no 303 reachable.
+- **Knob rings** — lit for the encoders that do something on the page you are on (knobs 1-4 white, 5-8 amber), brightness following the value; dark means turning it does nothing.
 
 ## Sync
 
@@ -102,7 +107,7 @@ Tempo follows Move's project BPM automatically. TB-3PO runs free (not gated by M
 
 ## Suspend / exit
 
-- **Back** — hide TB-3PO; both slots keep sequencing in the background.
+- **Back** — closes an open option list (or the list raised by turning an enum) first; with nothing open, hides TB-3PO while both slots keep sequencing in the background.
 - **Shift+Back** — full exit (release notes, unload).
 - **Shift+Vol+Back** — also suspends.
 - **Shift+Vol+Jog Click** — also full exit.
