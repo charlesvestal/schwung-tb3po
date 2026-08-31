@@ -873,7 +873,8 @@ git commit -m "feat: to-scale pad map and hardware key reference"
 **Acceptance Criteria:**
 - [ ] `drawPage` handles all five page kinds (`perform`, `knobs`, `pads`, `keys`) without falling through
 - [ ] PERFORM draws its knob row from `PAGE_PATTERN.keys` slots 0–3, not from a copy
-- [ ] Every non-PERFORM page draws the mini lane in the footer band
+- [ ] Every KNOBS page draws the mini lane in the footer band; Pads and Keys keep their hints instead
+- [ ] The lane assertion distinguishes a lane from hint text — two different playhead positions must produce different footer pixels
 - [ ] The bank bar segment count equals the ring length
 
 **Verify:** `node tests/pages.mjs` → `pages ok` and exit 0
@@ -938,13 +939,32 @@ ring.forEach((page, i) => {
     drawPage(fb, ctx, { ...view, ring, pageIndex: i });
     if (fb.clipped() !== 0) fail(page.name + " drew " + fb.clipped() + " px off-screen");
     if ([...fb.missingGlyphs].length) fail(page.name + " uses glyphs the device lacks");
-    /* The footer band carries the lane on every page but PERFORM. */
-    const footerLit = litRows(fb, 57, 63);
-    if (page.kind === "perform") {
-        if (footerLit === 0) fail("PERFORM has an empty footer");
-    } else if (footerLit === 0) {
-        fail(page.name + " has no footer lane");
-    }
+    if (litRows(fb, 57, 63) === 0) fail(page.name + " has an empty footer");
+});
+
+/*
+ * Whether the footer holds a LANE, distinguished from whether it holds
+ * anything at all.
+ *
+ * "the band has lit pixels" passes on hint text, so it cannot tell a lane from
+ * a footer that never got one -- which is exactly the bug it was written to
+ * catch. A lane MOVES: render the same page at two playhead positions and the
+ * band must differ. Hint text is identical either way, so the same probe
+ * proves the negative for Pads and Keys.
+ */
+function footerAt(page, i, position) {
+    const fb = createFramebuffer();
+    const ctx = drawContext(fb);
+    fb.clearScreen();
+    drawPage(fb, ctx, { ...view, ring, pageIndex: i, position });
+    return Buffer.from(fb.pixels.slice(57 * 128, 64 * 128)).toString("hex");
+}
+ring.forEach((page, i) => {
+    if (page.kind === "perform") return;
+    const moved = footerAt(page, i, 2) !== footerAt(page, i, 9);
+    const wantsLane = page.kind === "knobs";
+    if (wantsLane && !moved) fail(page.name + ": footer does not track the playhead — no lane");
+    if (!wantsLane && moved) fail(page.name + ": footer changed with the playhead but should be hints");
 });
 
 /* PERFORM's row must be Pattern's row 0, not a copy of it. */
@@ -1063,7 +1083,13 @@ export function drawPage(fb, ctx, view) {
  *
  * This is the only spare real estate on the screen: the bank bar is 2px at
  * y=7 and the grid rows start at y=9, so there is nothing between them. The
- * footer is seven pixels currently spent on hints that stop being read.
+ * footer is seven pixels otherwise spent on hints that stop being read.
+ *
+ * KNOB PAGES ONLY, deliberately. Pads and Keys are pages you READ rather than
+ * play, and their footers carry the one thing those pages cannot say any other
+ * way -- "TAP: REST>NOTE>ACC>SLIDE" is not derivable from a picture of the pad
+ * grid, and it has nowhere else to go, the map filling the body. Trading that
+ * for an ambient lane on a page nobody performs from is the wrong way round.
  */
 function drawFooterLane(fb, ctx, view) {
     drawFooter(ctx, [["JOG", "PAGE"]]);
