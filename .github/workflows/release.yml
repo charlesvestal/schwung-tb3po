@@ -38,7 +38,7 @@ jobs:
               "version": "${VERSION}",
               "download_url": "${URL}",
               "name": "TB-3PO",
-              "description": "Generative 303-style acid-bassline sequencer",
+              "description": "Generative 303-style acid-bassline sequencer (after Phazerville Hemisphere Suite)",
               "repo_url": "https://github.com/${{ github.repository }}"
           }
           EOF
