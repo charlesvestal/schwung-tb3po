@@ -1028,7 +1028,26 @@ function selectSlotPage(slotIdx, pageName) {
     if (slotChanged) syncAllValues();
     const r = pages();
     let found = r.findIndex((pg) => pg.name === pageName);
-    if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
+    if (found < 0) {
+        /*
+         * A PAGE THAT IS NOT THERE HAS TO SAY SO.
+         *
+         * The 303 page is absent from the set when no synth with module id
+         * "303" is in a chain slot, and this used to land silently on Pattern
+         * -- so pressing T2 for Cutoff simply put you somewhere else, with
+         * nothing to explain it. Reported from the device as "where is
+         * cutoff".
+         *
+         * The UI this replaced DID say it ("No 303 loaded -- route a 303 to
+         * Ch N") and dropping that was a mistake I made on the reasoning that
+         * a page set has nothing to refuse. The refusal was carrying the
+         * information; the absence on its own carries none.
+         */
+        if (pageName === "303") {
+            showOverlay("No 303 loaded", "route one to Ch " + (ui.slots[slotIdx].channel | 0));
+        }
+        found = r.findIndex((pg) => pg.name === "Pattern");
+    }
     pageIndex[slotIdx] = found < 0 ? 0 : found;
     if (pageName === "303" && has303Slot) sync303FromPlugin();
     syncController();
@@ -1152,7 +1171,7 @@ function trackLed(slotIdx, pageName) {
     if (pageName === "303" && !has303Slot) return LED_OFF;
     const active = (ui.activeSlot === slotIdx && curPage().name === pageName);
     if (!active) return LED_DARK_GREY;
-    return pageName === "Pattern" ? LED_TEAL : LED_ORANGE;
+    return pageName === "Steps" ? LED_TEAL : LED_ORANGE;
 }
 
 function refreshLeds() {
@@ -1236,9 +1255,9 @@ function refreshLeds() {
 
     // Track buttons 1..4 — slot + page. One is bright (the active slot showing
     // that page), the others dim. T2/T4 stay dark when no 303 is reachable.
-    setTrackLed(CC_TRACK1, trackLed(0, "Pattern"));
+    setTrackLed(CC_TRACK1, trackLed(0, "Steps"));
     setTrackLed(CC_TRACK2, trackLed(0, "303"));
-    setTrackLed(CC_TRACK3, trackLed(1, "Pattern"));
+    setTrackLed(CC_TRACK3, trackLed(1, "Steps"));
     setTrackLed(CC_TRACK4, trackLed(1, "303"));
 
     // Hardware buttons tb3po owns. Play is intentionally NOT set here —
@@ -1587,10 +1606,10 @@ globalThis.onMidiMessageInternal = function(data) {
     // T3/T4 = slot B Pattern/303. active_slot is a global DSP param (no a./b.
     // prefix) so the DSP knows which channel the 303-Control CC path rides.
     if (type === 0xB0 && d2 > 0) {
-        if      (d1 === CC_TRACK1) { selectSlotPage(0, "Pattern"); return; }
-        else if (d1 === CC_TRACK2) { selectSlotPage(0, "303");     return; }
-        else if (d1 === CC_TRACK3) { selectSlotPage(1, "Pattern"); return; }
-        else if (d1 === CC_TRACK4) { selectSlotPage(1, "303");     return; }
+        if      (d1 === CC_TRACK1) { selectSlotPage(0, "Steps"); return; }
+        else if (d1 === CC_TRACK2) { selectSlotPage(0, "303");   return; }
+        else if (d1 === CC_TRACK3) { selectSlotPage(1, "Steps"); return; }
+        else if (d1 === CC_TRACK4) { selectSlotPage(1, "303");   return; }
     }
 
     /*

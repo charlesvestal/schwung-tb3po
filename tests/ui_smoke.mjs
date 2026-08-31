@@ -62,6 +62,8 @@ globalThis.init();
 /* The real hardware entry point. The picker is a DISPATCH-ORDER feature, so
  * every gesture below goes in as MIDI rather than through a test-only opener. */
 const midi = (...d) => globalThis.onMidiMessageInternal(Uint8Array.from(d));
+const { isOverlayActive: overlayActive, hideOverlay } =
+    await import("/data/UserData/schwung/shared/menu_layout.mjs");
 const touch   = (k) => midi(0x90, k, 127);       /* knob capacitive touch */
 const untouch = (k) => midi(0x80, k, 0);
 const click   = () => midi(0xB0, 3, 127);        /* jog click */
@@ -666,6 +668,47 @@ for (const idx of r.keys()) {
           dark.length > 0 && dark.every((p) => p[3] === 0),
           "ring packets were " + JSON.stringify(dark));
     ui.__test.showPage(setupIdx);
+}
+
+/*
+ * THE TRACK BUTTONS, pinned.
+ *
+ * Nothing asserted this mapping and it shipped wrong: T1 went to Pattern, so
+ * the SEQUENCER page -- the one you would most want to snap back to -- was the
+ * only page no track button reached, and T2's 303 page silently landed on
+ * Pattern when no 303 was loaded, which is where "where is cutoff" came from.
+ *
+ * CC 43 is T1 and CC 40 is T4: the track CCs are REVERSED on this hardware.
+ */
+{
+    const CC_T = { 1: 43, 2: 42, 3: 41, 4: 40 };
+    const press = (n) => midi(0xB0, CC_T[n], 127);
+    const pageNow = () => ui.__test.curPage().name;
+
+    press(1);
+    check("T1 goes to the sequencer page", pageNow() === "Steps", pageNow());
+    eq("...on slot A", ui.__test.ui.activeSlot, 0);
+
+    press(3);
+    check("T3 is the same page on slot B", pageNow() === "Steps", pageNow());
+    eq("...on slot B", ui.__test.ui.activeSlot, 1);
+
+    /* This stub has no 303 plugin, so the page is absent -- which is exactly
+     * the case that used to fail silently. It must fall back AND say so. */
+    const has303 = ui.pages().some((p) => p.name === "303");
+    hideOverlay();                       /* so a stale one cannot pass this */
+    press(2);
+    eq("T2 selects slot A either way", ui.__test.ui.activeSlot, 0);
+    if (has303) {
+        check("T2 goes to the 303 page", pageNow() === "303", pageNow());
+    } else {
+        check("T2 falls back when there is no 303", pageNow() === "Pattern", pageNow());
+        /* menu_layout exports isOverlayActive but not the TEXT, so this proves
+         * an overlay was raised, not which one. The wording is covered by the
+         * render case; what would regress here is the silence. */
+        check("...and does not do it silently", overlayActive());
+    }
+    press(1);
 }
 
 console.log(failures === 0 ? "ui_smoke: all passed" : "ui_smoke: " + failures + " FAILED");
