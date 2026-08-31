@@ -296,19 +296,41 @@ export const TB3PO_PARAMS = [
     { key: "length",  label: "Length",  short_name: "Len",   type: "enum",  options: LENGTHS.map(String) },
     { key: "octaves", label: "Octaves", short_name: "Oct",   type: "int",   min: 1, max: 3, step: 1 },
 
-    { key: "cutoff",   label: "Cutoff",    short_name: "Cut", type: "int", min: 0, max: 127, step: 1 },
-    { key: "reson",    label: "Resonance", short_name: "Res", type: "int", min: 0, max: 127, step: 1 },
-    { key: "decay",    label: "Decay",     short_name: "Dec", type: "int", min: 0, max: 127, step: 1 },
-    { key: "envmod",   label: "Env Mod",   short_name: "Env", type: "int", min: 0, max: 127, step: 1 },
-    { key: "acc303",   label: "Accent",    short_name: "Acc", type: "int", min: 0, max: 127, step: 1 },
-    { key: "volume",   label: "Volume",    short_name: "Vol", type: "int", min: 0, max: 127, step: 1 },
-    { key: "drive",    label: "Drive",     short_name: "Drv", type: "int", min: 0, max: 127, step: 1 },
-    { key: "drivemix", label: "Drive Mix", short_name: "Mix", type: "int", min: 0, max: 127, step: 1 },
+    /*
+     * The 303 page's keys are the 303 PLUGIN's real param names, prefixed.
+     *
+     * Two reasons the prefix is not decoration. "accent" is already declared
+     * above as this sequencer's accent PROBABILITY, and the 303's accent
+     * AMOUNT is a different quantity on a different chain slot -- a shared
+     * key string would collide in the meta index and in the values object.
+     * And a declared key that matches no real param is a knob that turns and
+     * changes nothing, so the suffix here is exactly CC_303_PARAM_KEYS from
+     * ui.js and Task 7 strips "303." to get the write target.
+     *
+     * The prefix idiom is TB-3PO's own: per-slot DSP params are already
+     * namespaced "a." / "b." for the same reason.
+     */
+    { key: "303.cutoff",    label: "Cutoff",    short_name: "Cut", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.resonance", label: "Resonance", short_name: "Res", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.decay",     label: "Decay",     short_name: "Dec", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.env_mod",   label: "Env Mod",   short_name: "Env", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.accent",    label: "Accent",    short_name: "Acc", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.volume",    label: "Volume",    short_name: "Vol", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.drive",     label: "Drive",     short_name: "Drv", type: "int", min: 0, max: 127, step: 1 },
+    { key: "303.drive_mix", label: "Drive Mix", short_name: "Mix", type: "int", min: 0, max: 127, step: 1 },
 
     { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "int",  min: 1, max: 16, step: 1 },
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
     { key: "transpose", label: "Transpose", short_name: "Oct+", type: "int",  min: -48, max: 48, step: 12 },
-    { key: "bank",      label: "Bank",      short_name: "Bank", type: "int",  min: 1, max: 8, step: 1 },
+    /*
+     * There is deliberately no "bank" here. The DSP exposes store_bank,
+     * recall_bank, recall_bank_now, bank_filled and a read-only current_bank
+     * -- there is no plain bank SETTER to turn a knob into. Declaring one
+     * would draw a dial that turns and changes nothing, and declaring it
+     * read-only is worse: render_page_movy never consults meta.readOnly, so
+     * it would draw an ordinary dial that silently refuses to move. Banks are
+     * the pad row's job, with LEDs that already show which is current.
+     */
 ];
 
 export const PAGE_PERFORM = { name: "Steps", kind: "perform" };
@@ -321,11 +343,12 @@ export const PAGE_PERFORM = { name: "Steps", kind: "perform" };
 export const PAGE_PATTERN = { name: "Pattern", kind: "knobs",
     keys: ["density", "accent", "slide", "gate", "root", "scale", "length", "octaves"] };
 export const PAGE_303 = { name: "303", kind: "knobs",
-    keys: ["cutoff", "reson", "decay", "envmod", "acc303", "volume", "drive", "drivemix"] };
+    keys: ["303.cutoff", "303.resonance", "303.decay", "303.env_mod",
+           "303.accent", "303.volume", "303.drive", "303.drive_mix"] };
 /* Four knobs, four empty. Leaving it half-empty is a decision, not an
  * oversight: the alternative is moving a param off Pattern to fill space. */
 export const PAGE_SETUP = { name: "Setup", kind: "knobs",
-    keys: ["channel", "direction", "transpose", "bank", null, null, null, null] };
+    keys: ["channel", "direction", "transpose", null, null, null, null, null] };
 export const PAGE_PADS = { name: "Pads", kind: "pads" };
 export const PAGE_KEYS = { name: "Keys", kind: "keys" };
 
@@ -856,9 +879,9 @@ const view = {
     position: 6,
     values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
               root: 9, scale: 0, length: 1, octaves: 2,
-              cutoff: 96, reson: 74, decay: 58, envmod: 88,
-              acc303: 64, volume: 100, drive: 30, drivemix: 45,
-              channel: 1, direction: 0, transpose: 0, bank: 3 },
+              "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
+              "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
+              channel: 1, direction: 0, transpose: 0 },
 };
 
 const ring = ringFor({ has303: true });
@@ -1059,9 +1082,9 @@ const VIEW = {
     position: 6,
     values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
               root: 9, scale: 0, length: 1, octaves: 2,
-              cutoff: 96, reson: 74, decay: 58, envmod: 88,
-              acc303: 64, volume: 100, drive: 30, drivemix: 45,
-              channel: 1, direction: 0, transpose: 0, bank: 3 },
+              "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
+              "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
+              channel: 1, direction: 0, transpose: 0 },
 };
 
 const ring = ringFor({ has303: true });
@@ -1183,10 +1206,11 @@ function dspValues(slot) {
         density: slot.density, accent: slot.accent, slide: slot.slide, gate: slot.gate,
         root: slot.root, scale: slot.scale,
         length: Math.max(0, LENGTHS.indexOf(slot.length)), octaves: slot.octaves,
-        cutoff: slot.cc303[0], reson: slot.cc303[1], decay: slot.cc303[2], envmod: slot.cc303[3],
-        acc303: slot.cc303[4], volume: slot.cc303[5], drive: slot.cc303[6], drivemix: slot.cc303[7],
-        channel: slot.channel, direction: slot.direction,
-        transpose: slot.transpose, bank: slot.currentBank + 1,
+        "303.cutoff": slot.cc303[0], "303.resonance": slot.cc303[1],
+        "303.decay": slot.cc303[2], "303.env_mod": slot.cc303[3],
+        "303.accent": slot.cc303[4], "303.volume": slot.cc303[5],
+        "303.drive": slot.cc303[6], "303.drive_mix": slot.cc303[7],
+        channel: slot.channel, direction: slot.direction, transpose: slot.transpose,
     };
 }
 ```
