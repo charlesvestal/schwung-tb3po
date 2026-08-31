@@ -8,7 +8,7 @@ import {
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 import { createValue, createEnum } from '/data/UserData/schwung/shared/menu_items.mjs';
 import {
-    knobInit, knobTick,
+    knobInit, knobStep,
     KNOB_TYPE_FLOAT, KNOB_TYPE_INT, KNOB_TYPE_ENUM
 } from '/data/UserData/schwung/shared/knob_engine.mjs';
 
@@ -284,7 +284,7 @@ function adjustFloat(key, uiKey, delta, step, lo, hi) {
     const slot = cur();
     const st = getKnobState(uiKey, slot[uiKey]);
     const cfg = { type: KNOB_TYPE_FLOAT, min: lo, max: hi, step };
-    const next = knobTick(st, cfg, delta, Date.now());
+    const next = knobStep(st, cfg, delta, Date.now());
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
         setDspParam(slotKey(key), next.toFixed(3));
@@ -295,7 +295,7 @@ function adjustInt(key, uiKey, delta, lo, hi) {
     const slot = cur();
     const st = getKnobState(uiKey, slot[uiKey] | 0);
     const cfg = { type: KNOB_TYPE_INT, min: lo, max: hi, step: 1 };
-    const next = knobTick(st, cfg, delta, Date.now());
+    const next = knobStep(st, cfg, delta, Date.now());
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
         setDspParam(slotKey(key), String(next));
@@ -311,7 +311,7 @@ function adjustIntAsEnum(key, uiKey, delta, lo, hi) {
     const curIdx = clamp((slot[uiKey] | 0) - lo, 0, count - 1);
     const st = getKnobState(uiKey, curIdx);
     const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: count - 1, step: 1, enumCount: count };
-    const nextIdx = knobTick(st, cfg, delta, Date.now());
+    const nextIdx = knobStep(st, cfg, delta, Date.now());
     const next = nextIdx + lo;
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
@@ -323,7 +323,7 @@ function adjustEnum(key, uiKey, delta, count) {
     const slot = cur();
     const st = getKnobState(uiKey, slot[uiKey] | 0);
     const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: count - 1, step: 1, enumCount: count };
-    const next = knobTick(st, cfg, delta, Date.now());
+    const next = knobStep(st, cfg, delta, Date.now());
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
         setDspParam(slotKey(key), String(next));
@@ -336,7 +336,7 @@ function adjustLength(delta) {
     const curIdx = idx < 0 ? 1 : idx;
     const st = getKnobState("length", curIdx);
     const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: LENGTHS.length - 1, step: 1, enumCount: LENGTHS.length };
-    const nextIdx = knobTick(st, cfg, delta, Date.now());
+    const nextIdx = knobStep(st, cfg, delta, Date.now());
     const next = LENGTHS[nextIdx];
     if (next !== slot.length) {
         slot.length = next;
@@ -572,7 +572,7 @@ function send303Cc(knobIdx, delta) {
     const cur303 = slot.cc303[knobIdx] | 0;
     const st = getKnobState("303:" + knobIdx, cur303);
     const cfg = { type: KNOB_TYPE_INT, min: 0, max: 127, step: 1 };
-    const next = knobTick(st, cfg, delta, Date.now());
+    const next = knobStep(st, cfg, delta, Date.now());
     if (next === cur303) return;
     slot.cc303[knobIdx] = next;
     if (typeof shadow_send_midi_to_dsp === "function") {
