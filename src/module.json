@@ -2,7 +2,7 @@
     "id": "tb3po",
     "name": "TB-3PO",
     "version": "0.3.0",
-    "min_host_version": "1.0.5",
+    "min_host_version": "1.1.0",
     "author": "Charles Vestal",
     "description": "Generative 303-style acid-bassline sequencer (after Phazerville Hemisphere Suite)",
     "component_type": "tool",
