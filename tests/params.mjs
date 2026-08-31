@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { TB3PO_PARAMS, PAGE_PATTERN, ringFor } from "../src/params.mjs";
 /* Dynamic, not static: see the note in Task 4. params.mjs itself is pure data
  * with no device imports, so it may stay static. */
-const { buildMetaIndex } =
+const { buildMetaIndex, isReadOnly } =
     await import("/data/UserData/schwung/shared/param_pages/param_meta.mjs");
 
 let bad = 0;
@@ -59,6 +59,16 @@ if (!cc303Match) {
                  ", which is not in CC_303_PARAM_KEYS");
         }
     }
+}
+
+/*
+ * current_bank is a READOUT, not a control: the DSP has no plain bank
+ * setter, only current_bank (read-only). Dropping `access: "read"` from the
+ * declaration would silently regress it into an ordinary dial that writes a
+ * param the DSP rejects, with no visible symptom anywhere else.
+ */
+if (!isReadOnly(meta.getOrGuess("current_bank"))) {
+    fail("current_bank is not read-only");
 }
 
 if (bad) process.exit(1);

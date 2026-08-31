@@ -56,14 +56,21 @@ export const TB3PO_PARAMS = [
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
     { key: "transpose", label: "Transpose", short_name: "Oct+", type: "int",  min: -48, max: 48, step: 12 },
     /*
-     * There is deliberately no "bank" here. The DSP exposes store_bank,
-     * recall_bank, recall_bank_now, bank_filled and a read-only current_bank
-     * -- there is no plain bank SETTER to turn a knob into. Declaring one
-     * would draw a dial that turns and changes nothing, and declaring it
-     * read-only is worse: render_page_movy never consults meta.readOnly, so
-     * it would draw an ordinary dial that silently refuses to move. Banks are
-     * the pad row's job, with LEDs that already show which is current.
+     * A READOUT, not a control: `access: "read"`.
+     *
+     * The DSP exposes store_bank, recall_bank, recall_bank_now, bank_filled
+     * and a read-only current_bank -- there is no plain bank SETTER, so a
+     * normal declaration here would be a dial that turns and changes nothing.
+     * `access: "read"` is the supported way to say that, and the shared UI
+     * already honours it: a turn SHOWS the reading and writes nothing
+     * (shadow_ui.js isReadoutParam), and a click does not open a picker.
+     * keydetect is the canonical case.
+     *
+     * The key is `current_bank`, which is what the DSP actually answers to --
+     * `bank` matches nothing.
      */
+    { key: "current_bank", label: "Bank", short_name: "Bank", type: "int",
+      min: 1, max: 8, step: 1, access: "read" },
 ];
 
 export const PAGE_PERFORM = { name: "Steps", kind: "perform" };
@@ -81,7 +88,8 @@ export const PAGE_303 = { name: "303", kind: "knobs",
 /* Four knobs, four empty. Leaving it half-empty is a decision, not an
  * oversight: the alternative is moving a param off Pattern to fill space. */
 export const PAGE_SETUP = { name: "Setup", kind: "knobs",
-    keys: ["channel", "direction", "transpose", null, null, null, null, null] };
+    keys: ["channel", "direction", "transpose", "current_bank",
+           null, null, null, null] };
 export const PAGE_PADS = { name: "Pads", kind: "pads" };
 export const PAGE_KEYS = { name: "Keys", kind: "keys" };
 
