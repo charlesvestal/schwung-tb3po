@@ -323,14 +323,21 @@ export const TB3PO_PARAMS = [
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
     { key: "transpose", label: "Transpose", short_name: "Oct+", type: "int",  min: -48, max: 48, step: 12 },
     /*
-     * There is deliberately no "bank" here. The DSP exposes store_bank,
-     * recall_bank, recall_bank_now, bank_filled and a read-only current_bank
-     * -- there is no plain bank SETTER to turn a knob into. Declaring one
-     * would draw a dial that turns and changes nothing, and declaring it
-     * read-only is worse: render_page_movy never consults meta.readOnly, so
-     * it would draw an ordinary dial that silently refuses to move. Banks are
-     * the pad row's job, with LEDs that already show which is current.
+     * A READOUT, not a control: `access: "read"`.
+     *
+     * The DSP exposes store_bank, recall_bank, recall_bank_now, bank_filled
+     * and a read-only current_bank -- there is no plain bank SETTER, so a
+     * normal declaration here would be a dial that turns and changes nothing.
+     * `access: "read"` is the supported way to say that, and the shared UI
+     * already honours it: a turn SHOWS the reading and writes nothing
+     * (shadow_ui.js isReadoutParam), and a click does not open a picker.
+     * keydetect is the canonical case.
+     *
+     * The key is `current_bank`, which is what the DSP actually answers to --
+     * `bank` matches nothing.
      */
+    { key: "current_bank", label: "Bank", short_name: "Bank", type: "int",
+      min: 1, max: 8, step: 1, access: "read" },
 ];
 
 export const PAGE_PERFORM = { name: "Steps", kind: "perform" };
@@ -348,7 +355,8 @@ export const PAGE_303 = { name: "303", kind: "knobs",
 /* Four knobs, four empty. Leaving it half-empty is a decision, not an
  * oversight: the alternative is moving a param off Pattern to fill space. */
 export const PAGE_SETUP = { name: "Setup", kind: "knobs",
-    keys: ["channel", "direction", "transpose", null, null, null, null, null] };
+    keys: ["channel", "direction", "transpose", "current_bank",
+           null, null, null, null] };
 export const PAGE_PADS = { name: "Pads", kind: "pads" };
 export const PAGE_KEYS = { name: "Keys", kind: "keys" };
 
@@ -881,7 +889,7 @@ const view = {
               root: 9, scale: 0, length: 1, octaves: 2,
               "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
               "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
-              channel: 1, direction: 0, transpose: 0 },
+              channel: 1, direction: 0, transpose: 0, current_bank: 3 },
 };
 
 const ring = ringFor({ has303: true });
@@ -1084,7 +1092,7 @@ const VIEW = {
               root: 9, scale: 0, length: 1, octaves: 2,
               "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
               "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
-              channel: 1, direction: 0, transpose: 0 },
+              channel: 1, direction: 0, transpose: 0, current_bank: 3 },
 };
 
 const ring = ringFor({ has303: true });
@@ -1159,6 +1167,7 @@ At the top of `src/ui.js`, alongside the existing imports:
 
 ```js
 import { drawPage, META } from "./pages.mjs";
+import { isReadOnly } from "/data/UserData/schwung/shared/param_pages/param_meta.mjs";
 import { ringFor, PAGE_PATTERN, ROOT_NAMES, SCALE_NAMES, LENGTHS, DIRECTIONS }
     from "./params.mjs";
 ```
@@ -1211,6 +1220,7 @@ function dspValues(slot) {
         "303.accent": slot.cc303[4], "303.volume": slot.cc303[5],
         "303.drive": slot.cc303[6], "303.drive_mix": slot.cc303[7],
         channel: slot.channel, direction: slot.direction, transpose: slot.transpose,
+        current_bank: slot.currentBank + 1,
     };
 }
 ```
@@ -1255,6 +1265,19 @@ function handleKnob(knobIdx, delta) {
     if (delta === 0) return;
     const key = keyForKnob(knobIdx);
     if (!key) return;
+    /*
+     * A READOUT shows its reading and writes nothing.
+     *
+     * The shadow UI does this for chain components in isReadoutParam, but
+     * TB-3PO is a tool with its OWN knob dispatch, so it gets none of that for
+     * free and has to honour `access: "read"` itself -- otherwise turning the
+     * Bank cell would write current_bank, which the DSP does not accept.
+     */
+    if (isReadOnly(META.getOrGuess(key))) {
+        const info = knobOverlayInfo(key);
+        if (info) showOverlay(info.name, info.value);
+        return;
+    }
     if (curPage().name === "303") { send303Cc(knobIdx, delta); }
     else { editKey(key, delta); if (STALE_KEYS.has(key)) patternStale = true; }
     const info = knobOverlayInfo(key);
