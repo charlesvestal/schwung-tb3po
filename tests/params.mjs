@@ -1,15 +1,13 @@
 import { register } from "node:module";
 register("./hooks.mjs", import.meta.url);
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { TB3PO_PARAMS, PAGE_PATTERN, ringFor } from "../src/params.mjs";
-/*
- * Node resolves a module's own static imports at link time, before any of
- * its top-level code (including the register() call above) has run — so a
- * static import of the device path here would race the hook and always
- * lose. A dynamic import happens after link time, once register() has
- * already taken effect, which is exactly the pattern tests/render.mjs uses
- * to reach the sibling schwung checkout.
- */
+/* Dynamic, not static: see the note in Task 4. params.mjs itself is pure data
+ * with no device imports, so it may stay static. */
 const { buildMetaIndex } =
     await import("/data/UserData/schwung/shared/param_pages/param_meta.mjs");
 
@@ -34,6 +32,32 @@ const declared = new Set(TB3PO_PARAMS.map((p) => p.key));
 for (const page of ringFor({ has303: true })) {
     for (const k of (page.keys || [])) {
         if (k && !declared.has(k)) fail("page " + page.name + " names undeclared key " + k);
+    }
+}
+
+/*
+ * Every declared "303.<x>" key must, with the prefix stripped, be one of the
+ * real param names the 303 plugin answers to -- CC_303_PARAM_KEYS in ui.js.
+ * Read it out of ui.js at test time rather than hard-coding a second copy: a
+ * copy is exactly how the two drift apart again (this review found four that
+ * already had).
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const uiSrc = fs.readFileSync(path.join(HERE, "../src/ui.js"), "utf8");
+const cc303Match = uiSrc.match(/CC_303_PARAM_KEYS\s*=\s*\[([\s\S]*?)\]/);
+if (!cc303Match) {
+    fail("could not find CC_303_PARAM_KEYS in src/ui.js");
+} else {
+    const cc303Keys = new Set(
+        [...cc303Match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+    );
+    for (const p of TB3PO_PARAMS) {
+        if (!p.key.startsWith("303.")) continue;
+        const stripped = p.key.slice("303.".length);
+        if (!cc303Keys.has(stripped)) {
+            fail("declared key " + p.key + " strips to " + stripped +
+                 ", which is not in CC_303_PARAM_KEYS");
+        }
     }
 }
 
