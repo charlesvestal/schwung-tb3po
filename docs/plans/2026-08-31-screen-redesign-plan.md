@@ -496,6 +496,27 @@ Create `src/lane.mjs`:
 
 export const REST = 0, NOTE = 1, ACCENT = 2, SLIDE = 3;
 
+/*
+ * Both lanes draw a 16-step WINDOW, because a pattern is 8, 16, 24 or 32 steps
+ * and the screen is 128px wide.
+ *
+ * The two lanes pick their window differently, and the asymmetry is the point:
+ *
+ *   The BIG lane is something you EDIT. The pads write into the window on
+ *   screen, so it must be the window the user chose with the < > buttons --
+ *   auto-scrolling it would move the target out from under their hands.
+ *
+ *   The MINI lane is something you WATCH. It is ambient, has no interaction,
+ *   and no room to say which window it is showing, so it always follows the
+ *   playhead.
+ *
+ * An earlier draft of this file hard-coded steps 0..15 in both, which silently
+ * dropped the back half of every 24- and 32-step pattern and lost the playhead
+ * entirely once it passed step 15 -- while the Keys page still advertised
+ * "< >  STEP PG".
+ */
+export function windowFor(position) { return Math.floor((position | 0) / 16) * 16; }
+
 /* A slide is a note that ties into the next step, so it stands as tall as a
  * plain note. */
 function isRest(s) { return s === REST; }
@@ -518,19 +539,25 @@ function miniTop(y, h, s) {
  */
 export function drawMiniLane(fb, ctx, state, rect) {
     const { x, y, w, h } = rect;
-    const steps = state.steps;
+    const base = state.stepBase | 0;
+    /* `?? REST` rather than a bare index: a window running past the end of a
+     * short pattern must read as empty, and an undefined entry falls through
+     * both isRest and isAccent into the note branch, i.e. it would draw as a
+     * lit bar. */
+    const at = (i) => state.steps[base + i] ?? REST;
+    const steps = { length: 16 };
     const cw = w / 16;
     /* `heightOf` lets a test pin a slide's height without inventing a fifth
      * step state; in production a slide is always note-height. */
     const heightState = (i) =>
-        state.heightOf ? state.heightOf(i) : (steps[i] === SLIDE ? NOTE : steps[i]);
+        state.heightOf ? state.heightOf(i) : (at(i) === SLIDE ? NOTE : at(i));
 
     for (let i = 0; i < 16; i++) {
         const cx = Math.round(x + i * cw), nx = Math.round(x + (i + 1) * cw);
         const bw = Math.max(1, nx - cx - 1);
-        const s = steps[i];
+        const s = at(i);
 
-        if (i === state.position) {
+        if (base + i === state.position) {
             /* Full height, because the playhead is the one mark that has to
              * survive the compression whatever the step under it is. */
             ctx.fillRect(cx, y, bw, h, 1);
@@ -565,12 +592,13 @@ export function drawMiniLane(fb, ctx, state, rect) {
  * @param {object} rect { x, y, w, h } — h must be at least 22.
  */
 export function drawBigLane(fb, ctx, state, rect) {
-    const steps = state.steps;
+    const stepBase = state.stepBase | 0;
+    const at = (i) => state.steps[stepBase + i] ?? REST;
     const base = rect.y + rect.h - 6;
     ctx.fillRect(rect.x, base, rect.w, 1, 1);
 
     for (let i = 0; i < 16; i++) {
-        const x = rect.x + i * 8, s = steps[i];
+        const x = rect.x + i * 8, s = at(i);
         if (isRest(s)) continue;
         const bh = isAccent(s) ? 13 : 8;
         ctx.fillRect(x + 2, base - bh, 5, bh, 1);
@@ -581,7 +609,9 @@ export function drawBigLane(fb, ctx, state, rect) {
     for (let i = 0; i <= 16; i += 4) {
         ctx.fillRect(Math.min(rect.x + i * 8, rect.x + rect.w - 1), base + 1, 1, 3, 1);
     }
-    ctx.fillRect(rect.x + state.position * 8 + 1, base + 2, 7, 2, 1);
+    /* Only when the playhead is inside the window being shown. */
+    const pcol = (state.position | 0) - stepBase;
+    if (pcol >= 0 && pcol < 16) ctx.fillRect(rect.x + pcol * 8 + 1, base + 2, 7, 2, 1);
 }
 ```
 
@@ -884,7 +914,7 @@ const view = {
     slotLabel: "Slot A", bpm: 124, shiftHeld: false, touched: -1,
     steps: [ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
             REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT],
-    position: 6,
+    position: 6, stepView: 0,
     values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
               root: 9, scale: 0, length: 1, octaves: 2,
               "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
@@ -951,7 +981,7 @@ import { buildMetaIndex }
 import { createAnimState }
     from "/data/UserData/schwung/shared/param_pages/anim_state.mjs";
 import { TB3PO_PARAMS, PAGE_PATTERN } from "./params.mjs";
-import { drawBigLane, drawMiniLane } from "./lane.mjs";
+import { drawBigLane, drawMiniLane, windowFor } from "./lane.mjs";
 import { drawPadsPage, drawKeysPage } from "./pad_map.mjs";
 
 export const META = buildMetaIndex({ chainParams: TB3PO_PARAMS });
@@ -984,11 +1014,17 @@ export function drawPage(fb, ctx, view) {
         return;
     }
 
-    drawHeader(ctx, view.slotLabel + " - " + (view.bpm | 0), page.name, false);
+    /* PERFORM's page name names the window: "Steps 1-16", "Steps 17-32". */
+    const pageName = page.kind === "perform"
+        ? page.name + " " + (view.stepView * 16 + 1) + "-" + (view.stepView * 16 + 16)
+        : page.name;
+    drawHeader(ctx, view.slotLabel + " - " + (view.bpm | 0), pageName, false);
     drawBankBar(ctx, view.pageIndex, view.ring.length, null);
 
     if (page.kind === "perform") {
-        drawBigLane(fb, ctx, view, { x: 0, y: 12, w: 128, h: 22 });
+        /* The window the USER chose, because the pads edit what is shown. */
+        drawBigLane(fb, ctx, { ...view, stepBase: view.stepView * 16 },
+                    { x: 0, y: 12, w: 128, h: 22 });
         /*
          * A GENUINE grid row, from Pattern's own key list: drawKnobRow takes
          * its own rowY/lblY, so this is the same code Pattern runs rather than
@@ -1032,7 +1068,10 @@ export function drawPage(fb, ctx, view) {
 function drawFooterLane(fb, ctx, view) {
     drawFooter(ctx, [["JOG", "PAGE"]]);
     ctx.fillRect(46, 56, 82, 8, 0);
-    drawMiniLane(fb, ctx, view, { x: 48, y: FOOTER_BAND.y, w: 80, h: FOOTER_BAND.h });
+    /* The window the MUSIC is in, because nothing here is editable and there
+     * is no room to say which window you are looking at. */
+    drawMiniLane(fb, ctx, { ...view, stepBase: windowFor(view.position) },
+                 { x: 48, y: FOOTER_BAND.y, w: 80, h: FOOTER_BAND.h });
 }
 ```
 
@@ -1087,7 +1126,7 @@ const VIEW = {
     slotLabel: "Slot A", bpm: 124, shiftHeld: false, touched: -1,
     steps: [ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
             REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT],
-    position: 6,
+    position: 6, stepView: 0,
     values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
               root: 9, scale: 0, length: 1, octaves: 2,
               "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
