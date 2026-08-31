@@ -12,7 +12,7 @@ import {
 } from '/data/UserData/schwung/shared/knob_engine.mjs';
 import { isReadOnly } from '/data/UserData/schwung/shared/param_pages/param_meta.mjs';
 import { drawPage, META } from './pages.mjs';
-/* ROOT_NAMES and SCALE_NAMES are no longer imported: knobOverlayInfo formats
+/* ROOT_NAMES and SCALE_NAMES are no longer imported: the grid formats
  * an enum from its DECLARED options, so the names live in one place. */
 import { ringFor, PAGE_PATTERN, LENGTHS, DIRECTIONS } from './params.mjs';
 
@@ -352,6 +352,32 @@ function adjustLength(delta) {
 
 let patternStale = false;  // true when prob-knobs have changed since last generate
 
+/*
+ * AN OVERLAY IS FOR SOMETHING THE SCREEN DOES NOT ALREADY SHOW.
+ *
+ * It existed on every knob turn because the old UI drew no knobs at all, so a
+ * modal box was the only feedback there was. The grid draws the value in the
+ * cell and puts the held param's full name and value in the header strip, so
+ * the same box now lands ON TOP of the cell being turned -- it hides the one
+ * thing the user is looking at.
+ *
+ * So knob turns, jog page changes, step-button page jumps and slot switches
+ * are all silent now: the header names the slot and the page, and the bank bar
+ * says where that page sits. What KEEPS an overlay is a pad or button whose
+ * effect has no cell on the page you happen to be on -- bank save/recall,
+ * regenerate, mutate, direction, channel, clear, undo, transpose.
+ */
+
+/* The step window is the one page-ish change that is NOT always visible:
+ * PERFORM's header reads "Steps 17-32", but every other page shows no big
+ * lane, so there the button moves something with nothing on screen to see. */
+function announceStepWindow() {
+    if (curPage().kind === "perform") return;
+    const slot = cur();
+    showOverlay("Steps", (slot.stepView * 16 + 1) + "-" +
+                Math.min(slot.length, (slot.stepView + 1) * 16));
+}
+
 /* Jog turns PAGES. Editing a list with the jog is retired -- every value is
  * edited by the knob above it, which is what the grid is for. */
 function handleJogTurn(delta) {
@@ -359,7 +385,6 @@ function handleJogTurn(delta) {
     const n = ring().length;
     const step = delta > 0 ? 1 : -1;
     pageIndex[ui.activeSlot] = (clampPageIndex(ui.activeSlot) + step + n) % n;
-    showOverlay("Page", curPage().name);
 }
 
 /*
@@ -421,27 +446,6 @@ function editKey(key, delta) {
     adjustFloat(key, field, delta, meta.step > 0 ? meta.step : 0.01, meta.min, meta.max);
 }
 
-/* Overlay text for a KEY, formatted from its declared metadata rather than a
- * switch over knob indices -- there is no longer one knob per key. */
-function knobOverlayInfo(key) {
-    if (!key) return null;
-    const meta = META.getOrGuess(key);
-    const raw = dspValues(cur())[key];
-    if (raw === undefined) return null;
-    const slotTag = ui.activeSlot === 0 ? "A" : "B";
-    let value;
-    if (meta.type === "enum") {
-        const opts = Array.isArray(meta.options) ? meta.options : [];
-        const o = opts[raw | 0];
-        value = o === undefined ? String(raw) : String(o);
-    } else if (meta.type === "float") {
-        value = meta.unit === "%" ? (Math.round(raw * 100) + "%") : String(raw);
-    } else {
-        value = String(raw);
-    }
-    const prefix = key.indexOf("303.") === 0 ? "303-" : "TB-";
-    return { name: prefix + slotTag + " " + meta.label, value };
-}
 
 function handleKnob(knobIdx, delta) {
     if (delta === 0) return;
@@ -455,11 +459,7 @@ function handleKnob(knobIdx, delta) {
      * free and has to honour `access: "read"` itself -- otherwise turning the
      * Bank cell would write current_bank, which the DSP does not accept.
      */
-    if (isReadOnly(META.getOrGuess(key))) {
-        const ro = knobOverlayInfo(key);
-        if (ro) showOverlay(ro.name, ro.value);
-        return;
-    }
+    if (isReadOnly(META.getOrGuess(key))) return;
     /*
      * The 303 page writes by CC to ANOTHER chain slot, keyed by knob index --
      * the "303." prefix is stripped by never being used as a write target.
@@ -470,8 +470,6 @@ function handleKnob(knobIdx, delta) {
         editKey(key, delta);
         if (STALE_KEYS.has(key)) patternStale = true;
     }
-    const info = knobOverlayInfo(key);
-    if (info) showOverlay(info.name, info.value);
 }
 
 // Slot that currently hosts the 303 plugin. Refreshed on 303-mode entry and
@@ -553,7 +551,6 @@ function selectSlotPage(slotIdx, pageName) {
     if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
     pageIndex[slotIdx] = found < 0 ? 0 : found;
     if (pageName === "303" && has303Slot) sync303FromPlugin();
-    showOverlay("Slot " + (slotIdx === 0 ? "A" : "B"), curPage().name);
 }
 
 // -------- Pad handling ----------
@@ -924,7 +921,7 @@ globalThis.onMidiMessageInternal = function(data) {
         const slot = cur();
         if (stepPageCount() > 1 && slot.stepView > 0) {
             slot.stepView--;
-            showOverlay("Steps", (slot.stepView * 16 + 1) + "-" + Math.min(slot.length, (slot.stepView + 1) * 16));
+            announceStepWindow();
         }
         return;
     }
@@ -932,7 +929,7 @@ globalThis.onMidiMessageInternal = function(data) {
         const slot = cur();
         if (stepPageCount() > 1 && slot.stepView < stepPageCount() - 1) {
             slot.stepView++;
-            showOverlay("Steps", (slot.stepView * 16 + 1) + "-" + Math.min(slot.length, (slot.stepView + 1) * 16));
+            announceStepWindow();
         }
         return;
     }
@@ -967,7 +964,6 @@ globalThis.onMidiMessageInternal = function(data) {
         const stepIdx = d1 - NOTE_STEP_BASE;
         if (stepIdx >= 0 && stepIdx < ring().length) {
             pageIndex[ui.activeSlot] = stepIdx;
-            showOverlay("Page", curPage().name);
         }
         return;
     }
