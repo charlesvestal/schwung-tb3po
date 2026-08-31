@@ -8,7 +8,7 @@
  */
 import { renderPageMovy, drawKnobRow, drawHeader, drawBankBar, drawFooter }
     from "/data/UserData/schwung/shared/param_pages/render_page_movy.mjs";
-import { buildMetaIndex }
+import { buildMetaIndex, isDivable }
     from "/data/UserData/schwung/shared/param_pages/param_meta.mjs";
 import { createAnimState }
     from "/data/UserData/schwung/shared/param_pages/anim_state.mjs";
@@ -32,7 +32,7 @@ function common(view) {
 /**
  * @param {object} view
  *   slotLabel, bpm, ring, pageIndex, steps, position, values, touched,
- *   shiftHeld, diveHint
+ *   shiftHeld
  */
 export function drawPage(fb, ctx, view) {
     const page = view.ring[view.pageIndex];
@@ -42,7 +42,7 @@ export function drawPage(fb, ctx, view) {
             page, title: view.slotLabel,
             pageIndex: view.pageIndex, pageCount: view.ring.length,
         }));
-        drawFooterLane(fb, ctx, view);
+        drawFooterLane(fb, ctx, view, page);
         return;
     }
 
@@ -103,7 +103,7 @@ export function drawPage(fb, ctx, view) {
  * grid, and it has nowhere else to go, the map filling the body. Trading that
  * for an ambient lane on a page nobody performs from is the wrong way round.
  */
-function drawFooterLane(fb, ctx, view) {
+function drawFooterLane(fb, ctx, view, page) {
     /*
      * A DIVABLE CELL IS ANNOUNCED IN THE FOOTER, and it costs the lane.
      *
@@ -117,7 +117,18 @@ function drawFooterLane(fb, ctx, view) {
      * fighting over 82 pixels, and the swap only happens while a divable knob
      * is actually held.
      */
-    if (view.diveHint) {
+    /*
+     * DERIVED here, not handed in.
+     *
+     * It was a `view.diveHint` boolean the caller computed, which let ui.js and
+     * this renderer hold different opinions about whether the held cell is a
+     * door -- and the one that reaches the user is whichever drew last. The
+     * page keys and the meta index are both already in this function, so the
+     * question is answerable where the answer is used.
+     */
+    const heldKey = (view.touched >= 0 && page && page.keys)
+        ? page.keys[view.touched] : null;
+    if (heldKey && isDivable(META.getOrGuess(heldKey))) {
         drawFooter(ctx, [["JOG", "PAGE"], ["CLK", "OPEN"]]);
         return;
     }

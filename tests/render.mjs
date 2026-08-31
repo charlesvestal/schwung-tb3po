@@ -95,7 +95,9 @@ const VIEW = {
               root: 9, scale: 0, length: 1, octaves: 2,
               "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
               "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
-              channel: 1, direction: 0, transpose: 0, current_bank: 3 },
+              /* channel is an INDEX now, not a number: 0 renders as "1". The
+               * fixture said 1 and the Setup page drew "2". */
+              channel: 0, direction: 0, transpose: 0, current_bank: 3 },
 };
 
 const ring = ringFor({ has303: true });
@@ -109,6 +111,12 @@ cases.push(["pads-shift", (fb, ctx) =>
 cases.push(["pattern-touched", (fb, ctx) =>
     drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 1, touched: 1 })]);
 /* And the ring one page short, which is what no 303 loaded looks like. */
+/* The dive affordance and the picker it opens — rendered and eyeballed when
+ * they were built, but nothing pinned them, so a footer that stopped offering
+ * the dive would have been a silent regression. */
+cases.push(["setup-divable-held", (fb, ctx) =>
+    drawPage(fb, ctx, { ...VIEW, ring, pageIndex: 3, touched: 1 })]);
+
 const short = ringFor({ has303: false });
 cases.push(["no-303-ring", (fb, ctx) =>
     drawPage(fb, ctx, { ...VIEW, ring: short, pageIndex: 0 })]);

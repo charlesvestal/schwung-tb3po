@@ -959,7 +959,6 @@ function draw() {
          * the fleet's 967 divable cells wear none -- so the only honest place
          * to say the click will open something is the footer, and only while
          * the knob that would open it is under a hand. */
-        diveHint: !!heldKey && isDivable(META.getOrGuess(heldKey)),
         slotLabel: "Slot " + (ui.activeSlot === 0 ? "A" : "B"),
         bpm: ui.bpm,
         ring: r,
