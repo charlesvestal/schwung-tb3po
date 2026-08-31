@@ -17,26 +17,78 @@ const { createFramebuffer, drawContext } =
 /* pages.mjs imports the shared library by device path, so it too must come
  * in dynamically — the transitive import is resolved at the same link time. */
 const { drawPage } = await import("../src/pages.mjs");
-const { pagesFor, PAGE_PATTERN } = await import("../src/params.mjs");
+const { pagesFor, PAGE_PATTERN, controllerPageFor } = await import("../src/params.mjs");
 const { REST, NOTE, ACCENT, SLIDE } = await import("../src/lane.mjs");
+const { makeController } = await import("./fixture_ctl.mjs");
+const { BODY, BANDS } = await import("../src/pages.mjs");
+const { movyBandLayout, BAND_H } =
+    await import("/data/UserData/schwung/shared/param_pages/render_page_movy.mjs");
 
 let bad = 0;
 const fail = (m) => { console.error("FAIL " + m); bad++; };
+
+const { ctl } = makeController({ has303: true });
 
 const view = {
     slotLabel: "Slot A", bpm: 124, shiftHeld: false, touched: -1,
     steps: [ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
             REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT],
-    position: 6, stepView: 0,
-    values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
-              root: 9, scale: 0, length: 1, octaves: 2,
-              "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
-              "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
-              channel: 1, direction: 0, transpose: 0, current_bank: 3 },
+    position: 6, stepView: 0, ctl,
 };
 
 const pages = pagesFor({ has303: true });
 if (pages.length !== 6) fail("pages is not 6 pages");
+
+/*
+ * THE OUTER PAGE SET AND THE CONTRACT MUST AGREE ON WHAT EXISTS.
+ *
+ * The hierarchy is the sole definition of which cells are reachable and it
+ * fails SILENTLY -- drop a key and the page is simply planned one cell
+ * shorter, with no orphan page and no warning. tests/params.mjs asserts the
+ * key coverage; this asserts the PAGE coverage, which is the other half: one
+ * planned knob page per outer knob page, in the same order.
+ */
+{
+    const outerKnobs = pages.filter((p) => p.kind === "knobs");
+    if (ctl.pages.length !== outerKnobs.length) {
+        fail("the contract plans " + ctl.pages.length + " knob pages for " +
+             outerKnobs.length + " outer knob pages");
+    }
+    for (let i = 0; i < pages.length; i++) {
+        const target = controllerPageFor(pages, i);
+        const want = pages[i].kind === "knobs" || pages[i].kind === "perform";
+        if (want && !(target >= 0 && target < ctl.pages.length)) {
+            fail(pages[i].name + " maps to controller page " + target);
+        }
+        if (!want && target !== -1) fail(pages[i].name + " should map to no controller page");
+    }
+}
+
+/*
+ * THE BODY RECT PUTS THE ROWS WHERE THE DEVICE DRAWS THEM.
+ *
+ * With every chrome band stood down the layout CLOSES UP, so `rect.y` is not
+ * the row -- the first row lands one gutter below it. Passing ROW0_Y (9) gives
+ * [[10,25],[34,49]], one pixel low, which is the kind of drift nobody sees in
+ * a screenshot and everybody sees on hardware next to a footer that did not
+ * move. Asserted against the vertical rhythm's own numbers rather than
+ * against four literals.
+ */
+{
+    const L = movyBandLayout({ rect: BODY, bands: BANDS });
+    const got = L.rows.map((r) => [r.rowY, r.lblY]);
+    const want = JSON.stringify([[9, 24], [33, 48]]);
+    if (JSON.stringify(got) !== want) {
+        fail("BODY rect puts the knob rows at " + JSON.stringify(got) + ", want " + want);
+    }
+    if (L.header !== null || L.bank !== null || L.footer !== null) {
+        fail("BANDS still lays out chrome TB-3PO draws itself");
+    }
+    if (!L.fits) fail("the body does not fit BODY: dropped " + L.dropped.join(","));
+    if (BODY.y !== 9 - BAND_H.gutter0) {
+        fail("BODY.y is not ROW0_Y minus the first gutter");
+    }
+}
 
 const litRows = (fb, y0, y1) => {
     let n = 0;
@@ -48,6 +100,8 @@ pages.forEach((page, i) => {
     const fb = createFramebuffer();
     const ctx = drawContext(fb);
     fb.clearScreen();
+    const target = controllerPageFor(pages, i);
+    if (target >= 0) ctl.goToPage(target);
     drawPage(fb, ctx, { ...view, pages, pageIndex: i });
     if (fb.clipped() !== 0) fail(page.name + " drew " + fb.clipped() + " px off-screen");
     if ([...fb.missingGlyphs].length) fail(page.name + " uses glyphs the device lacks");
@@ -68,6 +122,8 @@ function footerAt(page, i, position) {
     const fb = createFramebuffer();
     const ctx = drawContext(fb);
     fb.clearScreen();
+    const target = controllerPageFor(pages, i);
+    if (target >= 0) ctl.goToPage(target);
     drawPage(fb, ctx, { ...view, pages, pageIndex: i, position });
     return Buffer.from(fb.pixels.slice(57 * 128, 64 * 128)).toString("hex");
 }

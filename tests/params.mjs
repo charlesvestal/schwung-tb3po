@@ -5,11 +5,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { TB3PO_PARAMS, PAGE_PATTERN, pagesFor } from "../src/params.mjs";
+import { TB3PO_PARAMS, PAGE_PATTERN, pagesFor, hierarchyFor } from "../src/params.mjs";
 /* Dynamic, not static: see the note in Task 4. params.mjs itself is pure data
  * with no device imports, so it may stay static. */
 const { buildMetaIndex, isReadOnly } =
     await import("/data/UserData/schwung/shared/param_pages/param_meta.mjs");
+const { planPages } =
+    await import("/data/UserData/schwung/shared/param_pages/page_plan.mjs");
 
 let bad = 0;
 const fail = (m) => { console.error("FAIL " + m); bad++; };
@@ -58,6 +60,63 @@ if (!cc303Match) {
             fail("declared key " + p.key + " strips to " + stripped +
                  ", which is not in CC_303_PARAM_KEYS");
         }
+    }
+}
+
+/*
+ * ===================== THE HIERARCHY IS THE ONLY DEFINITION =====================
+ *
+ * `keyForKnob` used to read a page's key list directly, so a key could not be
+ * lost: the page object WAS the answer. The shared controller plans from
+ * `ui_hierarchy` instead, which makes that declaration the sole statement of
+ * what is reachable -- and it fails SILENTLY. Dropping `transpose` and
+ * `current_bank` from the Setup level leaves a page planned with two cells:
+ * the params simply vanish. No orphan page, no warning, no error, nothing on
+ * screen that reads as wrong.
+ *
+ * So every declared param must land on some planned page, and it is asserted
+ * for BOTH shapes of the contract -- the 303 level is conditional, and a key
+ * reachable only when a 303 happens to be loaded is the same defect wearing a
+ * precondition. `303.*` keys are excused in the no-303 shape, and only those.
+ *
+ * Proven by mutation: remove any key from the `knobs` array `hierarchyFor`
+ * builds and this fails naming it; the rest of the suite stays green.
+ */
+for (const has303 of [true, false]) {
+    const planned = planPages({
+        hierarchy: hierarchyFor({ has303 }), chainParams: TB3PO_PARAMS,
+    });
+    if (planned.warnings.length) {
+        fail("planning the contract (has303=" + has303 + ") warned: " +
+             planned.warnings.join("; "));
+    }
+    const placed = new Set();
+    for (const page of planned.pages) {
+        for (const k of (page.keys || [])) if (k) placed.add(k);
+    }
+    for (const p of TB3PO_PARAMS) {
+        const is303 = p.key.startsWith("303.");
+        if (is303 && !has303) {
+            if (placed.has(p.key)) fail("303 key " + p.key + " is planned with no 303 loaded");
+            continue;
+        }
+        if (!placed.has(p.key)) {
+            fail("declared param " + p.key + " lands on NO planned page (has303=" +
+                 has303 + ") -- the hierarchy dropped it silently");
+        }
+    }
+    /* ...and nothing is planned that was never declared, which is the same
+     * failure pointing the other way: a knob that turns and changes nothing. */
+    const declaredKeys = new Set(TB3PO_PARAMS.map((p) => p.key));
+    for (const k of placed) {
+        if (!declaredKeys.has(k)) fail("planned key " + k + " is not declared");
+    }
+    /* The pages come out in the order pagesFor() puts them, which is what lets
+     * one index map onto the other -- see controllerPageFor. */
+    const names = pagesFor({ has303 }).filter((p) => p.kind === "knobs").length;
+    if (planned.pages.length !== names) {
+        fail("has303=" + has303 + ": " + planned.pages.length +
+             " planned pages against " + names + " outer knob pages");
     }
 }
 

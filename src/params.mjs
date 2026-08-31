@@ -28,12 +28,67 @@ export const DIRECTIONS = ["Fwd", "Rev", "Ping", "Rnd"];
  * picker, and the feel is unchanged: knob_engine gates every enum at
  * ENUM_DELTA_DIV detents per option, which is exactly what a 1..16 int already
  * got (NARROW_RANGE_MAX is 16).
- *
- * The cost is the same projection `length` already pays: the grid reads and
- * writes an INDEX, the DSP and the Ch-/Ch+ pads speak channel NUMBERS, and
- * ui.js is the one place the two are converted (dspValues / adjustChannel).
  */
-export const CHANNELS = Array.from({ length: 16 }, (_, i) => String(i + 1));
+/*
+ * "Ch 1" .. "Ch 16", NOT "1" .. "16", and the prefix is load-bearing.
+ *
+ * See the note above TB3PO_PARAMS: the shared write path resolves an enum by
+ * `options.indexOf(String(value))` BEFORE reading the value as an index, so an
+ * option whose text IS a small decimal shadows that index. With bare numerals
+ * this enum wrote the wrong channel for thirteen of the sixteen -- index 7
+ * matched the option named "7" and set channel 7 instead of 8 -- silently, on
+ * both the knob and the picker.
+ *
+ * The three-character cell still shows the bare number: `short_options` is
+ * what the enum square draws, and it never reaches the wire.
+ */
+export const CHANNELS = Array.from({ length: 16 }, (_, i) => "Ch " + (i + 1));
+export const CHANNEL_SHORT = Array.from({ length: 16 }, (_, i) => String(i + 1));
+
+/* Same rule, and here it also reads better: the picker says what the number
+ * counts. LENGTHS' bare numerals happened to be safe -- "0".."3" are not among
+ * "8","16","24","32" -- but safe by coincidence is one added option away from
+ * unsafe, and nothing would have failed to say so. */
+export const LENGTH_OPTIONS = LENGTHS.map((n) => n + " Steps");
+export const LENGTH_SHORT = LENGTHS.map(String);
+
+/*
+ * AN ENUM OPTION MUST NEVER READ AS ONE OF ITS OWN INDICES.
+ *
+ * `length` and `channel` are the two enums here whose options are quantities,
+ * and both used to be PROJECTED: the grid held an index and ui.js converted at
+ * every edge. Once the shared page controller owns the knob dispatch that
+ * projection stops being safe, and the reason is worth stating exactly,
+ * because nothing fails when it is got wrong.
+ *
+ * `formatParamForSet` (shared/param_format.mjs) resolves an enum value like
+ * this, and the order is unconditional:
+ *
+ *     const labelIdx = meta.options.indexOf(String(rawValue));
+ *     idx = labelIdx >= 0 ? labelIdx : Math.round(Number(rawValue));
+ *
+ * The knob engine's value IS an index, so with options named "1".."16" the
+ * index 7 matches the OPTION named "7" and the write lands on option 6 --
+ * channel 7 where the user asked for 8. Measured: wrong for thirteen of the
+ * sixteen, on the knob and on the picker alike, with the cell showing the
+ * value the grid believes it wrote. `enumIndexOf` has the mirror of it on the
+ * read, and `learnEnumWireFormat` would latch the wrong convention off the
+ * first reading. LENGTHS' "8","16","24","32" were safe only because "0".."3"
+ * happen not to be among them -- one added option from unsafe, with nothing to
+ * say so.
+ *
+ * TWO declarations settle it together:
+ *
+ *   the option TEXT is never a bare decimal ("Ch 8", "16 Steps"), so no index
+ *   can shadow an option;
+ *
+ *   `options_as_string: true` says the wire value IS that text, by
+ *   declaration, and is never learned over.
+ *
+ * So the wire reads "16 Steps" and "Ch 10", ui.js takes the integer out of it,
+ * and there is no index anywhere. `short_options` keeps the 30px cell showing
+ * the bare number, and never reaches the wire.
+ */
 
 export const TB3PO_PARAMS = [
     { key: "density", label: "Density", short_name: "Dens",  type: "float", min: 0, max: 1, step: 0.01, unit: "%" },
@@ -42,7 +97,8 @@ export const TB3PO_PARAMS = [
     { key: "gate",    label: "Gate",    short_name: "Gate",  type: "float", min: 0.1, max: 1, step: 0.01, unit: "%" },
     { key: "root",    label: "Root",    short_name: "Root",  type: "enum",  options: ROOT_NAMES },
     { key: "scale",   label: "Scale",   short_name: "Scale", type: "enum",  options: SCALE_NAMES },
-    { key: "length",  label: "Length",  short_name: "Len",   type: "enum",  options: LENGTHS.map(String) },
+    { key: "length",  label: "Length",  short_name: "Len",   type: "enum",  options: LENGTH_OPTIONS,
+      short_options: LENGTH_SHORT, options_as_string: true },
     { key: "octaves", label: "Octaves", short_name: "Oct",   type: "int",   min: 1, max: 3, step: 1 },
 
     /*
@@ -68,7 +124,8 @@ export const TB3PO_PARAMS = [
     { key: "303.drive",     label: "Drive",     short_name: "Drv", type: "int", min: 0, max: 127, step: 1 },
     { key: "303.drive_mix", label: "Drive Mix", short_name: "Mix", type: "int", min: 0, max: 127, step: 1 },
 
-    { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "enum", options: CHANNELS },
+    { key: "channel",   label: "MIDI Ch",   short_name: "Chan", type: "enum", options: CHANNELS,
+      short_options: CHANNEL_SHORT, options_as_string: true },
     { key: "direction", label: "Direction", short_name: "Dir",  type: "enum", options: DIRECTIONS },
     { key: "transpose", label: "Transpose", short_name: "Oct+", type: "int",  min: -48, max: 48, step: 12 },
     /*
@@ -122,4 +179,74 @@ export function pagesFor({ has303 }) {
     if (has303) pages.push(PAGE_303);
     pages.push(PAGE_SETUP, PAGE_PADS, PAGE_KEYS);
     return pages;
+}
+
+/*
+ * THE `ui_hierarchy` TB-3PO PUBLISHES TO ITS OWN PAGE CONTROLLER.
+ *
+ * TB-3PO is a tool: nothing on the wire serves it a contract, so it declares
+ * one for itself and answers `synth:ui_hierarchy` out of this function. The
+ * shared controller then plans, paginates, dispatches and draws the three knob
+ * pages, and TB-3PO keeps the four it owns (Steps, Pads, Keys, and the chrome
+ * around all of them).
+ *
+ * DERIVED FROM THE PAGE OBJECTS, never re-listed. The hierarchy is now the
+ * SOLE definition of which params are reachable, and it fails silently: drop a
+ * key here and the cell simply is not planned — no orphan page, no warning,
+ * nothing on screen to notice. That is why the key lists come from PAGE_*
+ * rather than being typed a second time, and why tests/params.mjs asserts that
+ * every declared param lands on some planned page.
+ *
+ * The walk order is load-bearing: planPages emits root's grid first, then
+ * visits `params` level edges in order. So the controller's pages come out as
+ * Pattern, 303, Setup — the same relative order pagesFor() gives them, which
+ * is what lets one index map onto the other.
+ *
+ * The root level's grid page is named "Main" by the planner whatever this
+ * declares (16 modules would otherwise open on a page called "Patch"). That
+ * name is never shown: TB-3PO's own page set is the sole authority for
+ * anything user-visible, and the header is drawn from `PAGE_*.name`.
+ */
+export function hierarchyFor({ has303 }) {
+    const levels = {
+        root: {
+            label: PAGE_PATTERN.name,
+            knobs: PAGE_PATTERN.keys.filter(Boolean),
+            params: [
+                ...(has303 ? [{ level: "fx303", label: PAGE_303.name }] : []),
+                { level: "setup", label: PAGE_SETUP.name },
+            ],
+        },
+        setup: { label: PAGE_SETUP.name, knobs: PAGE_SETUP.keys.filter(Boolean) },
+    };
+    if (has303) levels.fx303 = { label: PAGE_303.name, knobs: PAGE_303.keys.filter(Boolean) };
+    return { modes: null, levels };
+}
+
+/**
+ * Which of the controller's knob pages backs the outer page at `outerIndex`.
+ *
+ * ONE FUNCTION, because there are now two indices and they must not be kept in
+ * step at each call site. TB-3PO owns 0..5 over `pagesFor()`; the controller
+ * owns 0..2 over the pages `hierarchyFor()` plans. The mapping is positional:
+ * the n-th knob page of the outer set is the n-th planned page, which is what
+ * makes the derivation above load-bearing.
+ *
+ * PERFORM maps to the Pattern page rather than to nothing. Its four live knobs
+ * ARE Pattern's row 0 — the same four in the same positions — so parking the
+ * controller there gives that row its dispatch, its knob engine and its values
+ * from the same place the Pattern page gets them, instead of a second copy.
+ *
+ * Pads and Keys return -1: nothing of the controller is shown, so nothing
+ * should move.
+ */
+export function controllerPageFor(pages, outerIndex) {
+    const page = pages[outerIndex];
+    if (!page) return -1;
+    if (page.kind !== "knobs" && page.kind !== "perform") return -1;
+    let n = 0;
+    for (let i = 0; i < outerIndex; i++) if (pages[i].kind === "knobs") n++;
+    /* PERFORM sits BEFORE Pattern and counts none, which lands it on 0 — the
+     * Pattern page — exactly as intended. */
+    return n;
 }

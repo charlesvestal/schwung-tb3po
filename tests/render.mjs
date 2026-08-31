@@ -83,43 +83,84 @@ export async function main(cases) {
 }
 
 const { drawPage } = await import("../src/pages.mjs");
-const { pagesFor } = await import("../src/params.mjs");
+const { pagesFor, controllerPageFor } = await import("../src/params.mjs");
 const { REST, NOTE, ACCENT, SLIDE } = await import("../src/lane.mjs");
+const { makeController } = await import("./fixture_ctl.mjs");
+
+/*
+ * A REAL CONTROLLER, because the controller is what draws a knob page now.
+ *
+ * A fixture that hands `drawPage` a bare `values` map no longer renders a
+ * simpler grid -- it renders NO grid, and every one of these snapshots would
+ * quietly become a picture of the chrome alone. See tests/fixture_ctl.mjs.
+ */
+const { ctl } = makeController({ has303: true });
 
 const VIEW = {
     slotLabel: "Slot A", bpm: 124, shiftHeld: false, touched: -1,
     steps: [ACCENT, REST, NOTE, SLIDE, NOTE, REST, ACCENT, NOTE,
             REST, NOTE, NOTE, REST, SLIDE, NOTE, REST, ACCENT],
-    position: 6, stepView: 0,
-    values: { density: 0.72, accent: 0.4, slide: 0.25, gate: 0.55,
-              root: 9, scale: 0, length: 1, octaves: 2,
-              "303.cutoff": 96, "303.resonance": 74, "303.decay": 58, "303.env_mod": 88,
-              "303.accent": 64, "303.volume": 100, "303.drive": 30, "303.drive_mix": 45,
-              /* channel is an INDEX now, not a number: 0 renders as "1". The
-               * fixture said 1 and the Setup page drew "2". */
-              channel: 0, direction: 0, transpose: 0, current_bank: 3 },
+    position: 6, stepView: 0, ctl,
 };
 
 const pages = pagesFor({ has303: true });
+
+/*
+ * Put the controller in the state ui.js would have put it in, then draw.
+ *
+ * TWO things, and neither is optional. The page, because the outer index and
+ * the controller's are not the same number (syncController). And the TOUCH,
+ * because a held knob is the controller's state -- `view.touched` only tells
+ * TB-3PO's chrome which knob to name in the header, while the INVERTED CELL is
+ * drawn by the controller's own body from `state.touchOrder`. Setting one
+ * without the other renders a header that says a knob is held above a grid
+ * that says none is, which is what the first version of this fixture did.
+ */
+function draw(fb, ctx, view) {
+    const target = controllerPageFor(view.pages, view.pageIndex);
+    if (target >= 0) view.ctl.goToPage(target);
+    view.ctl.clearTouch();
+    if (view.touched >= 0) view.ctl.onKnobTouch(view.touched, true);
+    drawPage(fb, ctx, view);
+}
+
 const cases = pages.map((page, i) =>
     [page.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-     (fb, ctx) => drawPage(fb, ctx, { ...VIEW, pages, pageIndex: i })]);
+     (fb, ctx) => draw(fb, ctx, { ...VIEW, pages, pageIndex: i })]);
 
 /* The states a static walk of the pages cannot reach. */
 cases.push(["pads-shift", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, pages, pageIndex: 4, shiftHeld: true })]);
+    draw(fb, ctx, { ...VIEW, pages, pageIndex: 4, shiftHeld: true })]);
+/*
+ * A HELD KNOB TAKES THE HEADER OVER, and on a knob page that strip is the
+ * controller's -- which TB-3PO has switched off (`bands.header: false`). So it
+ * has to be redrawn from `movyHeaderFor`, or the header would go on saying
+ * "Pattern" through the whole gesture. These two are the pin: one on each of
+ * the two pages the controller draws, so a page that lost the readout cannot
+ * hide behind one that kept it.
+ */
 cases.push(["pattern-touched", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, pages, pageIndex: 1, touched: 1 })]);
-/* And the pages one page short, which is what no 303 loaded looks like. */
+    draw(fb, ctx, { ...VIEW, pages, pageIndex: 1, touched: 1 })]);
+cases.push(["303-touched", (fb, ctx) =>
+    draw(fb, ctx, { ...VIEW, pages, pageIndex: 2, touched: 5 })]);
+/* ...and on PERFORM, whose row is drawn by TB-3PO rather than by the
+ * controller's body, so it is a third draw path and not a repeat. */
+cases.push(["steps-touched", (fb, ctx) =>
+    draw(fb, ctx, { ...VIEW, pages, pageIndex: 0, touched: 2 })]);
 /* The dive affordance and the picker it opens — rendered and eyeballed when
  * they were built, but nothing pinned them, so a footer that stopped offering
  * the dive would have been a silent regression. */
 cases.push(["setup-divable-held", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, pages, pageIndex: 3, touched: 1 })]);
+    draw(fb, ctx, { ...VIEW, pages, pageIndex: 3, touched: 1 })]);
 
+/* And the pages one page short, which is what no 303 loaded looks like. The
+ * contract loses its 303 LEVEL too, so this needs its own controller: the
+ * page set is the plan, and planning it from a hierarchy that still declares
+ * the 303 would be testing a state the device never reaches. */
 const short = pagesFor({ has303: false });
+const shortCtl = makeController({ has303: false }).ctl;
 cases.push(["no-303-ring", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW, pages: short, pageIndex: 0 })]);
+    draw(fb, ctx, { ...VIEW, ctl: shortCtl, pages: short, pageIndex: 0 })]);
 
 /*
  * The window work landed after the plan's case list was written: a 32-step
@@ -134,11 +175,12 @@ const STEPS32 = [
     NOTE, REST, SLIDE, NOTE, ACCENT, REST, NOTE, NOTE,
     REST, ACCENT, NOTE, SLIDE, NOTE, REST, NOTE, ACCENT,
 ];
-const VIEW32 = { ...VIEW, steps: STEPS32, values: { ...VIEW.values, length: 3 } };
+const VIEW32 = { ...VIEW, steps: STEPS32 };
+const CTL32 = makeController({ has303: true, values: { length: "32 Steps" } }).ctl;
 cases.push(["perform-window2", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW32, pages, pageIndex: 0, stepView: 1, position: 20 })]);
+    draw(fb, ctx, { ...VIEW32, ctl: CTL32, pages, pageIndex: 0, stepView: 1, position: 20 })]);
 cases.push(["pattern-window2", (fb, ctx) =>
-    drawPage(fb, ctx, { ...VIEW32, pages, pageIndex: 1, position: 20 })]);
+    draw(fb, ctx, { ...VIEW32, ctl: CTL32, pages, pageIndex: 1, position: 20 })]);
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     const failCount = await main(cases);

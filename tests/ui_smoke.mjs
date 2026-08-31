@@ -36,6 +36,16 @@ const ui = await import("../src/ui.js");
 const { isReadOnly: META_isReadOnly, isDivable: META_isDivable } =
     await import("/data/UserData/schwung/shared/param_pages/param_meta.mjs");
 
+/*
+ * THE REAL LIFECYCLE ENTRY, before anything is asked.
+ *
+ * `init()` is where the controller reads TB-3PO's contract, plans its pages
+ * and warms the landing page's values -- so before it runs there is no page
+ * set, no meta index and no answer to "which key does knob 3 drive". On
+ * hardware the host calls it; here nothing else will.
+ */
+globalThis.init();
+
 /* The real hardware entry point. The picker is a DISPATCH-ORDER feature, so
  * every gesture below goes in as MIDI rather than through a test-only opener. */
 const midi = (...d) => globalThis.onMidiMessageInternal(Uint8Array.from(d));
@@ -44,6 +54,25 @@ const untouch = (k) => midi(0x80, k, 0);
 const click   = () => midi(0xB0, 3, 127);        /* jog click */
 /* decodeDelta: 1..63 is CW, 65..127 is CCW as 128-value. */
 const jog = (n) => midi(0xB0, 14, n >= 0 ? n : 128 + n);
+/* A knob CC as the OVERTAKE path delivers it: the value is the accumulated
+ * detent COUNT for the frame, not a single tick. */
+const knob = (slot, n) => midi(0xB0, 71 + slot, n >= 0 ? n : 128 + n);
+/*
+ * A WRITE IS THROTTLED, so a turn is not a write yet.
+ *
+ * The controller coalesces writes to a key at SETPARAM_THROTTLE_MS and leaves
+ * the latest in `pendingWrite` for the next tick to flush -- which is a real
+ * behaviour change from the old per-detent dispatch, and one a test that never
+ * ticks would read as "the knob does nothing". tick() is the host's own call,
+ * so this is the real flush and not a test-only door.
+ */
+const flush = () => {
+    /* Past the throttle window, then the host's own tick. Busy-waited rather
+     * than awaited so the assertions below stay in reading order. */
+    const until = Date.now() + 25;
+    while (Date.now() < until) { /* spin */ }
+    globalThis.tick();
+};
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -73,87 +102,120 @@ for (let i = 4; i < 8; i++) {
 
 /* Pattern's row 1 is the notes row. */
 const patternIdx = r.findIndex((p) => p.name === "Pattern");
-ui.__test.pageIndex[0] = patternIdx;
+ui.__test.showPage(patternIdx);
 eq("Pattern knob 5 -> root",    ui.keyForKnob(4), "root");
 eq("Pattern knob 8 -> octaves", ui.keyForKnob(7), "octaves");
 
 /* Setup: Bank is knob 4, and knobs 5-8 are declared null. */
 const setupIdx = r.findIndex((p) => p.name === "Setup");
-ui.__test.pageIndex[0] = setupIdx;
+ui.__test.showPage(setupIdx);
 eq("Setup knob 4 -> current_bank", ui.keyForKnob(3), "current_bank");
 eq("Setup knob 5 has no key",      ui.keyForKnob(4), null);
 
 /*
  * A READOUT shows its reading and writes nothing.
  *
- * TWO BARRIERS, and this test asserts both, because the no-write assertion
- * alone is not sensitive to either one: disabling handleKnob's isReadOnly
- * guard still writes nothing, since current_bank also has no KEY_FIELD entry
- * for editKey to route. Proven by mutation. So the declaration is asserted
- * separately -- an `access: "read"` dropped from params.mjs would leave a
- * turnable dial writing a key the DSP does not accept, and only this catches
- * it.
+ * The guard is the CONTROLLER'S now -- `isTurnable` excludes a readOnly param,
+ * so `onKnobTurn` swallows the motion -- and there is no second barrier left
+ * in ui.js to hide behind. Driven through the real knob CC for exactly that
+ * reason: nothing between the encoder and the DSP is skipped.
  */
 check("current_bank is DECLARED a readout",
       META_isReadOnly(ui.__test.metaFor("current_bank")),
       "meta was " + JSON.stringify(ui.__test.metaFor("current_bank")));
-check("current_bank has no write route",
-      ui.__test.keyField("current_bank") === undefined);
+eq("Setup knob 4 is current_bank", ui.keyForKnob(3), "current_bank");
 writes.length = 0;
-ui.__test.handleKnob(3, 40);
+for (let i = 0; i < 20; i++) knob(3, +3);
 eq("turning the Bank readout writes nothing", writes.length, 0);
 
 /* ...while the knob beside it, which is a real param, does write. Without this
- * the assertion above would also pass on a handleKnob that did nothing. */
+ * the assertion above would also pass on a dispatch that did nothing at all. */
 writes.length = 0;
-ui.__test.handleKnob(0, 40);
+for (let i = 0; i < 20; i++) knob(0, +3);
+flush();
 check("turning MIDI Ch on the same page does write",
       writes.some((w) => w[0] === "a.channel"),
       "writes were " + JSON.stringify(writes));
 
-/* `length` is an enum of INDICES to the grid and a step COUNT to the DSP. */
-ui.__test.pageIndex[0] = patternIdx;
+/*
+ * `length` AND `channel` ARE ENUMS WHOSE OPTIONS ARE NUMERALS, and the wire
+ * value is the option TEXT -- a step COUNT and a channel NUMBER, which is what
+ * the DSP and the Ch-/Ch+ pads speak.
+ *
+ * There is no index projection left anywhere, and that is the point: the
+ * controller writes through `formatParamForSet`, which resolves an enum by
+ * asking `options.indexOf(String(value))` FIRST. For CHANNELS that lookup
+ * SUCCEEDS on an index -- index 3 is the name of option 2 -- so an index on
+ * this wire comes back one channel short for thirteen of the sixteen, in
+ * silence. `options_as_string` is what settles it, so it is asserted as a
+ * DECLARATION as well as through the round trip.
+ */
+const lenMeta = ui.__test.metaFor("length");
+check("length declares options_as_string", !!lenMeta.options_as_string,
+      "meta was " + JSON.stringify(lenMeta));
+ui.__test.showPage(patternIdx);
 ui.__test.ui.slots[0].length = 16;
-eq("length projects to its option INDEX", ui.__test.dspValues(ui.__test.ui.slots[0]).length, 1);
+eq("length reads its step COUNT", ui.__test.getParam("length"), "16 Steps");
 writes.length = 0;
-ui.__test.editKey("length", 40);
-const lenWrite = writes.find((w) => w[0] === "a.length");
+for (let i = 0; i < 30; i++) knob(6, +3);        /* Pattern knob 7 = length */
+flush();
+const lenWrite = writes.filter((w) => w[0] === "a.length").pop();
 check("length writes a step COUNT, not an index",
       !!lenWrite && ["8", "16", "24", "32"].indexOf(lenWrite[1]) >= 0,
       "wrote " + JSON.stringify(lenWrite));
+eq("...and the slot agrees with the wire",
+   String(ui.__test.ui.slots[0].length), lenWrite && lenWrite[1]);
 
-/*
- * `channel` is an ENUM of INDICES to the grid and a channel NUMBER to the DSP
- * and to the Ch-/Ch+ action pads -- the same round trip `length` makes, pinned
- * the same way, because the two must not drift.
- */
 const chMeta = ui.__test.metaFor("channel");
 eq("channel is declared an enum", chMeta.type, "enum");
 eq("channel declares 16 options", (chMeta.options || []).length, 16);
+check("channel declares options_as_string", !!chMeta.options_as_string,
+      "meta was " + JSON.stringify(chMeta));
 check("channel is DIVABLE", META_isDivable(chMeta),
       "meta was " + JSON.stringify(chMeta));
+ui.__test.showPage(setupIdx);
 ui.__test.ui.slots[0].channel = 10;
-eq("channel projects to its option INDEX",
-   ui.__test.dspValues(ui.__test.ui.slots[0]).channel, 9);
+ui.__test.noteExternalChange("channel");
+eq("channel reads its channel NUMBER", ui.__test.getParam("channel"), "Ch 10");
 writes.length = 0;
-ui.__test.editKey("channel", 40);
-const chWrite = writes.find((w) => w[0] === "a.channel");
+for (let i = 0; i < 20; i++) knob(0, +3);
+flush();
+const chWrite = writes.filter((w) => w[0] === "a.channel").pop();
 check("channel writes a channel NUMBER, not an index",
       !!chWrite && Number(chWrite[1]) >= 1 && Number(chWrite[1]) <= 16 &&
       Number(chWrite[1]) === ui.__test.ui.slots[0].channel,
       "wrote " + JSON.stringify(chWrite) + " slot=" + ui.__test.ui.slots[0].channel);
+check("...and it MOVED, so the round trip is not a fixed point",
+      ui.__test.ui.slots[0].channel !== 10,
+      "channel is still " + ui.__test.ui.slots[0].channel);
 
-/* The Ch-/Ch+ ACTION PADS (row 0, cols 3 and 4 = notes 71 and 72) still write
- * a channel number directly. An index leaking onto this path is exactly the
- * regression the enum conversion could have caused. */
+/* The Ch-/Ch+ ACTION PADS (row 0, cols 3 and 4 = notes 71 and 72) write a
+ * channel number directly, one press one channel. */
 ui.__test.ui.slots[0].channel = 4;
+ui.__test.noteExternalChange("channel");
 writes.length = 0;
 for (let i = 0; i < 4; i++) midi(0x90, 72, 127);   /* Ch+ */
 const padWrite = writes.filter((w) => w[0] === "a.channel").pop();
+eq("Ch+ steps one channel per press", ui.__test.ui.slots[0].channel, 8);
 check("Ch+ pad writes a channel NUMBER",
-      !!padWrite && Number(padWrite[1]) === ui.__test.ui.slots[0].channel &&
-      Number(padWrite[1]) >= 1 && Number(padWrite[1]) <= 16,
+      !!padWrite && Number(padWrite[1]) === ui.__test.ui.slots[0].channel,
       "wrote " + JSON.stringify(padWrite) + " slot=" + ui.__test.ui.slots[0].channel);
+
+/*
+ * A PAD EDIT MUST REACH THE GRID'S KNOB ENGINE, not just the DSP.
+ *
+ * The engine seeds its running value once per key and never re-syncs, so
+ * without noteExternalChange the first detent after four Ch+ presses steps
+ * from where the KNOB was and snaps the channel back. Asserted as the
+ * behaviour rather than as the call: turn one detent and the value must move
+ * away from 8, not back toward 4.
+ */
+writes.length = 0;
+for (let i = 0; i < 3; i++) knob(0, +3);   /* 9 detents: more than one option */
+flush();
+check("a knob turn after the pad continues from the PAD's value",
+      ui.__test.ui.slots[0].channel > 8,
+      "channel is " + ui.__test.ui.slots[0].channel + ", want above the pad's 8");
 
 /* ---------------------------------------------------------------- picker
  *
@@ -161,20 +223,34 @@ check("Ch+ pad writes a channel NUMBER",
  * through an opener exported for the test: the whole feature is a question of
  * DISPATCH ORDER, and a helper that skips the dispatch cannot answer it.
  */
-ui.__test.pageIndex[0] = setupIdx;
+ui.__test.showPage(setupIdx);
 eq("Setup knob 2 -> direction", ui.keyForKnob(1), "direction");
 eq("Setup knob 1 -> channel",   ui.keyForKnob(0), "channel");
 
+/*
+ * TURNING A KNOB CLAIMS IT, so "nothing is held" has to mean it.
+ *
+ * The controller's `touched` follows a TURN as well as a touch -- a knob can
+ * be moved without the capacitive pad ever registering, and the header has to
+ * follow the one you are working on. The claim expires on its own
+ * (TURN_CLAIM_MS), but the tests above have just spun two knobs, so it is
+ * cleared explicitly rather than being waited out.
+ */
+ui.__test.ctl.clearTouch();
 check("nothing is held, so a click opens nothing",
       (click(), ui.__test.picker() === null));
 
 /* A DIVABLE key opens it. */
 ui.__test.ui.slots[0].direction = 0;
+ui.__test.noteExternalChange("direction");
 touch(1); click();
 let pk = ui.__test.picker();
 check("holding Direction and clicking opens the picker", pk !== null);
 eq("...on the right key", pk && pk.key, "direction");
 eq("...with the declared options", pk && pk.options.join(","), "Fwd,Rev,Ping,Rnd");
+check("...and they are the SHARED meta's options, not a local list",
+      pk && pk.options.join(",") ===
+          (ui.__test.metaFor("direction").options || []).join(","));
 eq("...opened at the LIVE index", pk && pk.index, 0);
 eq("...and marks the live value", pk && pk.openIndex, 0);
 
@@ -211,14 +287,17 @@ const dirWrite = writes.find((w) => w[0] === "a.direction");
 eq("...and writing it to the DSP", dirWrite && dirWrite[1], "3");
 untouch(1);
 
-/* Channel commits a NUMBER, from an index. */
+/* The picker commits through `ctl.commitEnum`, so the value on the wire is the
+ * option TEXT and the slot gets the number out of it -- not an index, which on
+ * this enum would have landed one channel short. */
 ui.__test.ui.slots[0].channel = 1;
+ui.__test.noteExternalChange("channel");
 touch(0); click();
 check("holding MIDI Ch and clicking opens the picker", ui.__test.picker() !== null);
 jog(9);
 writes.length = 0;
 click();
-eq("channel commits index+1 to the slot", ui.__test.ui.slots[0].channel, 10);
+eq("the picker commits the CHOSEN channel", ui.__test.ui.slots[0].channel, 10);
 const chCommit = writes.find((w) => w[0] === "a.channel");
 eq("...and writes the channel number", chCommit && chCommit[1], "10");
 untouch(0);
@@ -240,12 +319,12 @@ untouch(0);
  * key whose declaration stops matching it is what these catch.
  */
 ui.__test.pageIndex[0] = r.findIndex((p) => p.name === "303");
-if (ui.__test.pageIndex[0] < 0) ui.__test.pageIndex[0] = setupIdx;
+if (ui.__test.pageIndex[0] < 0) ui.__test.showPage(setupIdx);
 {
     const cutMeta = ui.__test.metaFor("303.cutoff");
     check("303.cutoff is NOT divable", !META_isDivable(cutMeta));
 }
-ui.__test.pageIndex[0] = setupIdx;
+ui.__test.showPage(setupIdx);
 touch(2);                            /* Setup knob 3 = transpose, an int */
 click();
 check("holding a plain int and clicking opens nothing", ui.__test.picker() === null);
@@ -265,6 +344,74 @@ touch(4);
 click();
 check("holding an empty cell and clicking opens nothing", ui.__test.picker() === null);
 untouch(4);
+
+/*
+ * THE TWO INDICES STAY ONE-TO-ONE, on every outer page.
+ *
+ * `syncController` is the single function that moves them together, and this
+ * walks every outer page through it: the controller must land exactly where
+ * `controllerPageFor` says, and must not move at all on Pads or Keys.
+ */
+{
+    const { controllerPageFor } = await import("../src/params.mjs");
+    const set = ui.pages();
+    for (let i = 0; i < set.length; i++) {
+        const before = ui.__test.ctl.pageIndex;
+        ui.__test.showPage(i);
+        const want = controllerPageFor(set, i);
+        if (want >= 0) {
+            eq("outer " + set[i].name + " parks the controller on " + want,
+               ui.__test.ctl.pageIndex, want);
+        } else {
+            eq("outer " + set[i].name + " moves the controller nowhere",
+               ui.__test.ctl.pageIndex, before);
+        }
+    }
+    ui.__test.showPage(0);
+}
+
+/* ---------------------------------------------------------- slot A/B
+ *
+ * TWO SEQUENCERS BEHIND THE SAME KEYS. `dspValues` was recomputed on every
+ * draw, so switching slots was free; the controller CACHES its values, so a
+ * switch that forgot to invalidate them would show slot A's channel on slot B
+ * -- and go on showing it, because nothing about the KEY changed.
+ */
+ui.__test.ui.slots[0].channel = 3;
+ui.__test.ui.slots[1].channel = 12;
+ui.__test.ui.activeSlot = 0;
+ui.__test.showPage(setupIdx);
+ui.__test.ctl.state.values.channel = ui.__test.getParam("channel");
+eq("slot A shows its own channel", ui.__test.ctl.state.values.channel, "Ch 3");
+midi(0xB0, 41, 127);                 /* Track 3 = slot B, Pattern */
+eq("...and T3 switched to slot B", ui.__test.ui.activeSlot, 1);
+eq("the grid followed the slot, not the key",
+   ui.__test.ctl.state.values.channel, "Ch 12");
+midi(0xB0, 43, 127);                 /* Track 1 = back to slot A */
+eq("...and back again", ui.__test.ctl.state.values.channel, "Ch 3");
+
+/* ------------------------------------------------- the 303 page appears
+ *
+ * The 303 page is a LEVEL in the contract, so a 303 arriving changes the
+ * contract's SHAPE -- the controller has to be re-planned, or the outer page
+ * set grows to six while the controller still has two knob pages and every
+ * index behind the 303 names the wrong one.
+ */
+{
+    eq("no 303: the contract plans 2 knob pages", ui.__test.ctl.pages.length, 2);
+    globalThis.shadow_get_param = (slot) => (slot === 0 ? "303" : "");
+    for (let i = 0; i < 70; i++) globalThis.tick();
+    eq("a 303 appearing gives 6 outer pages", ui.pages().length, 6);
+    eq("...and 3 planned knob pages", ui.__test.ctl.pages.length, 3);
+    ui.__test.showPage(ui.pages().findIndex((p) => p.name === "303"));
+    eq("...whose knob 1 is the 303's cutoff", ui.keyForKnob(0), "303.cutoff");
+    globalThis.shadow_get_param = () => "";
+    for (let i = 0; i < 70; i++) globalThis.tick();
+    eq("a 303 leaving gives 5 outer pages again", ui.pages().length, 5);
+    eq("...and 2 planned knob pages", ui.__test.ctl.pages.length, 2);
+    check("...and the page landed on is a real one",
+          ui.__test.ctl.pageIndex < ui.__test.ctl.pages.length);
+}
 
 /* The lifecycle exports the host calls are all present. */
 for (const fn of ["init", "tick", "onMidiMessageInternal", "onMidiMessageExternal", "onUnload"]) {

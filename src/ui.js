@@ -6,16 +6,39 @@ import {
 import {
     setLED as sharedSetLED, setButtonLED as sharedSetButtonLED
 } from '/data/UserData/schwung/shared/input_filter.mjs';
-import {
-    knobInit, knobStep,
-    KNOB_TYPE_FLOAT, KNOB_TYPE_INT, KNOB_TYPE_ENUM
-} from '/data/UserData/schwung/shared/knob_engine.mjs';
-import { isReadOnly, isDivable } from '/data/UserData/schwung/shared/param_pages/param_meta.mjs';
+import { decodeDelta } from '/data/UserData/schwung/shared/input_filter.mjs';
+/*
+ * THE SHARED KNOB GRID, WHOLE.
+ *
+ * TB-3PO used to drive `renderPageMovy` directly and hand-roll everything
+ * around it: the page set, the knob->key dispatch, touch tracking, a readout
+ * guard, a knob_engine call per param type and a dive picker. Every one of
+ * those already existed in `page_controller.mjs`, so what TB-3PO had was a
+ * second implementation of it -- and second implementations lose the parts
+ * nobody re-derived. Here that was the widget animation store, the write and
+ * announce throttles, the staggered read cursor, and every graphic.
+ *
+ * `createController` is now the whole binding: it plans the pages from the
+ * contract TB-3PO publishes to itself (see params.mjs `hierarchyFor`),
+ * dispatches the knobs, owns the knob engine, holds the values, and draws the
+ * BODY of a knob page. TB-3PO keeps its chrome, its pads, its LEDs and its
+ * four non-knob pages. `page_input.mjs` turns Move's MIDI into intents so the
+ * decoding is not a third copy either.
+ *
+ * The pattern, and the reasoning behind every part of it, is
+ * schwung-movy-embed's `src/renderer/schwung-page.ts` -- another project that
+ * made this exact mistake and undid it.
+ */
+import { createController, LAYOUT_MOVY }
+    from '/data/UserData/schwung/shared/param_pages/page_controller.mjs';
+import { decodeInput, applyInput }
+    from '/data/UserData/schwung/shared/param_pages/page_input.mjs';
 import { drawEnumList } from '/data/UserData/schwung/shared/param_pages/enum_list.mjs';
-import { drawPage, META } from './pages.mjs';
+import { drawPage, PERFORM_KNOBS } from './pages.mjs';
 /* ROOT_NAMES and SCALE_NAMES are no longer imported: the grid formats
  * an enum from its DECLARED options, so the names live in one place. */
-import { pagesFor, PAGE_PATTERN, LENGTHS, DIRECTIONS } from './params.mjs';
+import { pagesFor, hierarchyFor, controllerPageFor, TB3PO_PARAMS, DIRECTIONS }
+    from './params.mjs';
 
 //
 // Knobs (CC 71-78, relative encoders) edit params. Pads are arranged 4x8
@@ -131,10 +154,126 @@ function clampPageIndex(slotIdx) {
     return i;
 }
 
-/* The grid puts the held knob's full name and value in the header strip, so
- * the overlay is no longer needed for it -- but the strip needs to know which
- * knob is under a finger. */
-let touchedKnob = -1;
+/* ================= THE SHARED PAGE CONTROLLER =================
+ *
+ * TB-3PO IS ITS OWN MODULE. The controller does no param I/O of its own -- rule
+ * one of param_pages -- so every read and write below answers out of this
+ * file's state and never touches IPC. `synth:ui_hierarchy` and
+ * `synth:chain_params` are the contract TB-3PO declares for itself; everything
+ * else is a slot field.
+ *
+ * The prefix is the default "synth", so the keys arriving here are
+ * "synth:<key>" and this is the one place the prefix is stripped.
+ */
+const PREFIX = "synth:";
+const bareKey = (k) => (k.slice(0, PREFIX.length) === PREFIX ? k.slice(PREFIX.length) : k);
+
+/*
+ * The contract, stringified ONCE per shape rather than per read.
+ *
+ * The controller re-reads both keys on every reload, and TB3PO_PARAMS is ~2 KB
+ * -- cheap on the wire and not cheap at 44 Hz on this CPU. The hierarchy is
+ * rebuilt only when a 303 appears or leaves, which is the only thing that
+ * changes its shape.
+ */
+const CHAIN_PARAMS_JSON = JSON.stringify(TB3PO_PARAMS);
+let hierarchyJson = null;
+let hierarchyHas303 = null;
+function hierarchyJsonFor(has303) {
+    if (hierarchyHas303 !== has303) {
+        hierarchyHas303 = has303;
+        hierarchyJson = JSON.stringify(hierarchyFor({ has303: has303 }));
+    }
+    return hierarchyJson;
+}
+
+const ctl = createController({
+    getParam: (fullKey) => uiGetParam(bareKey(fullKey)),
+    setParam: (fullKey, val) => { uiSetParam(bareKey(fullKey), val); },
+    /* TB-3PO has no screen-reader path of its own yet; announcing into nothing
+     * is better than a second announcer disagreeing with the host's. */
+    announce: () => {},
+});
+ctl.setLayout(LAYOUT_MOVY);
+
+/*
+ * WHICH KNOBS ARE LIVE ON THE PAGE THE USER IS LOOKING AT.
+ *
+ * The controller is parked on the Pattern page while PERFORM is shown, so its
+ * knobs 5-8 have real keys -- but PERFORM draws one row and only four of its
+ * knobs do anything. Gating here rather than inside the controller keeps the
+ * controller's page honest: the page really does have eight keys, TB-3PO is
+ * simply not showing four of them.
+ */
+function knobLive(slot) {
+    const kind = curPage().kind;
+    if (kind === "knobs") return true;
+    if (kind === "perform") return slot < PERFORM_KNOBS;
+    return false;
+}
+
+/*
+ * ONE DETENT PER UNIT OF DELTA, and this is not a nicety.
+ *
+ * `applyInput` calls `onKnobTurn` with a DIRECTION and moves one detent, which
+ * is right for the shadow UI: the surface hands it one CC per physical detent.
+ * An OVERTAKE module is fed by a different path -- shadow_ui.js batches the
+ * encoder ticks of a frame and sends the accumulated COUNT as the CC value
+ * (see the header note) -- so collapsing to +-1 throws the rest of a fast flick
+ * away and the knob moves at the speed of the slowest possible turn whatever
+ * you do with it. movy hit exactly this and reported it as "knobs move very
+ * very slowly like shift is held"; the old TB-3PO dispatch avoided it by
+ * passing the count straight into knob_engine.
+ *
+ * Capped because the delta arrives as a signed byte: a garbled CC should cost
+ * a bounded number of steps, not 63 of them.
+ */
+function knobTurn(intent) {
+    const n = Math.min(Math.abs(intent.direction) | 0, 32) || 1;
+    const t = Date.now();
+    const one = { type: "knob", slot: intent.slot,
+                  direction: intent.direction > 0 ? 1 : -1, fine: intent.fine };
+    for (let i = 0; i < n; i++) applyInput(ctl, one, { nowMs: t });
+}
+
+/*
+ * The held knob AS THE SCREEN SHOULD SHOW IT.
+ *
+ * `state.touched` is the controller's, and it follows a TURN as well as a
+ * touch (a knob can be moved without the capacitive pad ever registering).
+ * Clamped by the same rule as knobLive, so PERFORM cannot report a hold on a
+ * knob it does not draw and Pads/Keys cannot report one at all.
+ */
+function heldSlot() {
+    const t = ctl.state.touched;
+    if (t < 0) return -1;
+    return knobLive(t) ? t : -1;
+}
+
+/*
+ * ONE FUNCTION, because there are now two page indices.
+ *
+ * TB-3PO owns the outer 0..5 and the controller owns its own 0..2, and a
+ * mapping repeated at each call site is a mapping that ends up applied at four
+ * of the five. Every path that moves the outer index -- jog, step buttons,
+ * track buttons, a 303 appearing or leaving -- ends here.
+ */
+function syncController() {
+    const r = pages();
+    const target = controllerPageFor(r, clampPageIndex(ui.activeSlot));
+    /*
+     * `remember: false` -- GO EXACTLY HERE.
+     *
+     * `goToPage` otherwise runs the target through the controller's SECTION
+     * MEMORY, which can land on a different page of the same level than the one
+     * asked for. That is right for its own jog, where the user is navigating
+     * the controller's page set; it is wrong here, where TB-3PO's outer index
+     * has already decided and the two must stay one-to-one. Harmless today
+     * (each level plans exactly one page, so the memory returns the index it
+     * was given) and a silent index drift the moment a level plans two.
+     */
+    if (target >= 0 && target !== ctl.pageIndex) ctl.goToPage(target, { remember: false });
+}
 
 function stepPageCount() { return Math.max(1, Math.ceil(cur().length / 16)); }
 function clampStepView()  { const m = stepPageCount() - 1; if (cur().stepView > m) cur().stepView = m; if (cur().stepView < 0) cur().stepView = 0; }
@@ -213,7 +352,11 @@ function pollDsp() {
         }
     }
     if ((pollTick % 10) === 0) {
+        /* A bank recall brings a whole pattern back, LENGTH included -- an edit
+         * the grid did not make. See noteExternalChange. */
+        const wasLength = cur().length;
         parsePattern(getDspParam(slotKey("pattern")));
+        if (cur().length !== wasLength) noteExternalChange("length");
         const bank = getDspParam(slotKey("current_bank"));
         if (bank !== null && bank !== "") cur().currentBank = parseInt(bank, 10) | 0;
         const pending = getDspParam(slotKey("pending_recall"));
@@ -261,6 +404,14 @@ function pollDsp() {
                 if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
                 pageIndex[sIdx] = found < 0 ? 0 : found;
             }
+            /* The 303 page is a LEVEL in the contract TB-3PO publishes to
+             * itself, so its arrival or departure changes the hierarchy's
+             * shape. This is the only thing that does, which is why the
+             * controller is re-planned here rather than probed every tick --
+             * `reloadIfChanged` re-reads and re-plans, and planPages is not
+             * free at 44 Hz. */
+            ctl.reloadIfChanged();
+            syncController();
             if (prev && wasNames[ui.activeSlot] === "303") {
                 showOverlay("303 unloaded", "page removed");
             }
@@ -269,122 +420,173 @@ function pollDsp() {
     pollTick++;
 }
 
-// -------- Knob handling ----------
-
-// Shadow UI batches encoder ticks per frame (~22ms) and encodes the
-// accumulated count as the CC value (CW = 1..63, CCW = 65..127). The
-// per-frame batched count is fed as `direction` to knob_engine, which
-// applies the unified divisor curve (fine when slow, accumulating when
-// fast) and the 10-tick-per-option enum budget shared with schwung.
-function decodeDelta(value) {
-    if (value === 0 || value === 64) return 0;
-    if (value <= 63) return value;
-    return -(128 - value);
-}
+// -------- The controller's parameter I/O ----------
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// Per-key knob_engine state. Keyed by uiKey (per-slot would multiply state
-// for a feature nobody asks for; the slot's current value is re-synced into
-// the engine on every tick anyway).
-const knobStates = new Map();
-function getKnobState(key, currentValue) {
-    let st = knobStates.get(key);
-    if (!st) {
-        st = knobInit(currentValue);
-        knobStates.set(key, st);
-    } else {
-        st.value = currentValue;
-    }
-    return st;
-}
-
-function adjustFloat(key, uiKey, delta, step, lo, hi) {
-    const slot = cur();
-    const st = getKnobState(uiKey, slot[uiKey]);
-    const cfg = { type: KNOB_TYPE_FLOAT, min: lo, max: hi, step };
-    const next = knobStep(st, cfg, delta, Date.now());
-    if (next !== slot[uiKey]) {
-        slot[uiKey] = next;
-        setDspParam(slotKey(key), next.toFixed(3));
-    }
-}
-
-function adjustInt(key, uiKey, delta, lo, hi, step) {
-    const slot = cur();
-    const st = getKnobState(uiKey, slot[uiKey] | 0);
-    const cfg = { type: KNOB_TYPE_INT, min: lo, max: hi, step: step > 0 ? step : 1 };
-    const next = knobStep(st, cfg, delta, Date.now());
-    if (next !== slot[uiKey]) {
-        slot[uiKey] = next;
-        setDspParam(slotKey(key), String(next));
-    }
-}
-
-/* Tiny int ranges (e.g. octaves 1..3) feel like enums — route them through
- * the engine's enum branch so each option needs the full enum tick budget
- * instead of the int divisor. */
-function adjustIntAsEnum(key, uiKey, delta, lo, hi) {
-    const slot = cur();
-    const count = hi - lo + 1;
-    const curIdx = clamp((slot[uiKey] | 0) - lo, 0, count - 1);
-    const st = getKnobState(uiKey, curIdx);
-    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: count - 1, step: 1, enumCount: count };
-    const nextIdx = knobStep(st, cfg, delta, Date.now());
-    const next = nextIdx + lo;
-    if (next !== slot[uiKey]) {
-        slot[uiKey] = next;
-        setDspParam(slotKey(key), String(next));
-    }
-}
-
-function adjustEnum(key, uiKey, delta, count) {
-    const slot = cur();
-    const st = getKnobState(uiKey, slot[uiKey] | 0);
-    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: count - 1, step: 1, enumCount: count };
-    const next = knobStep(st, cfg, delta, Date.now());
-    if (next !== slot[uiKey]) {
-        slot[uiKey] = next;
-        setDspParam(slotKey(key), String(next));
-    }
-}
-
-function adjustLength(delta) {
-    const slot = cur();
-    const idx = LENGTHS.indexOf(slot.length);
-    const curIdx = idx < 0 ? 1 : idx;
-    const st = getKnobState("length", curIdx);
-    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: LENGTHS.length - 1, step: 1, enumCount: LENGTHS.length };
-    const nextIdx = knobStep(st, cfg, delta, Date.now());
-    const next = LENGTHS[nextIdx];
-    if (next !== slot.length) {
-        slot.length = next;
-        setDspParam(slotKey("length"), String(next));
-    }
+/*
+ * The integer inside an option's text -- 16 from "16 Steps", 10 from "Ch 10".
+ *
+ * `length` and `channel` wire their option TEXT rather than an index, because
+ * an option that reads as a bare decimal shadows its own index in the shared
+ * write path (see the note in params.mjs). This is the one place that text is
+ * turned back into the quantity the DSP wants.
+ */
+function firstInt(v) {
+    const m = String(v).match(/-?\d+/);
+    return m ? parseInt(m[0], 10) : NaN;
 }
 
 /*
- * `channel` is an enum of INDICES to the grid and a channel NUMBER everywhere
- * else -- the DSP, the Ch-/Ch+ action pads, and send303Cc's status byte. This
- * is the only place that projection lives on the write side, exactly as
- * adjustLength is for `length`; dspValues is its inverse.
+ * WHAT A KEY READS.
  *
- * The engine state is keyed "channel:idx" rather than "channel" ON PURPOSE:
- * the action pads still drive adjustInt("channel", "channel", ...) in CHANNEL
- * space, and knob_engine's detent accumulator is per-key. Sharing one key
- * would mean two callers banking partial turns into the same accumulator in
- * two different units.
+ * Every value is a string, because that is what a get_param answers with and
+ * the controller parses accordingly. Two conventions are load-bearing and both
+ * are declared rather than converted here:
+ *
+ *   `length` and `channel` are enums with `options_as_string`, so their wire
+ *   value IS the option text -- a step COUNT and a channel NUMBER, exactly
+ *   what the DSP and the Ch-/Ch+ pads speak. There is no index projection
+ *   anywhere any more; see the note in params.mjs for why an index would be
+ *   actively wrong for these two.
+ *
+ *   `root`, `scale` and `direction` are index-addressed enums whose options
+ *   are words, so the index is the wire value and the DSP already speaks it.
+ *
+ * An unknown key answers "" -- served, nothing to say -- and never null, which
+ * on this channel would mean "the read did not complete" and is a thing that
+ * cannot happen when the answer is a local field.
  */
-function adjustChannel(delta) {
+function uiGetParam(key) {
+    if (key === "ui_hierarchy") return hierarchyJsonFor(has303Slot);
+    if (key === "chain_params") return CHAIN_PARAMS_JSON;
     const slot = cur();
-    const curIdx = clamp((slot.channel | 0) - 1, 0, 15);
-    const st = getKnobState("channel:idx", curIdx);
-    const cfg = { type: KNOB_TYPE_ENUM, min: 0, max: 15, step: 1, enumCount: 16 };
-    const next = knobStep(st, cfg, delta, Date.now()) + 1;
-    if (next !== slot.channel) {
-        slot.channel = next;
-        setDspParam(slotKey("channel"), String(next));
+    switch (key) {
+        case "density": return String(slot.density);
+        case "accent":  return String(slot.accent);
+        case "slide":   return String(slot.slide);
+        case "gate":    return String(slot.gate);
+        case "root":    return String(slot.root | 0);
+        case "scale":   return String(slot.scale | 0);
+        /* The option TEXT, which is this enum's wire value. */
+        case "length":  return (slot.length | 0) + " Steps";
+        case "octaves": return String(slot.octaves | 0);
+        case "channel": return "Ch " + (slot.channel | 0);
+        case "direction": return String(slot.direction | 0);
+        case "transpose": return String(slot.transpose | 0);
+        /* A READOUT. 1-based, because the pads and the overlays count banks
+         * from 1 and the cell must agree with them. */
+        case "current_bank": return String((slot.currentBank | 0) + 1);
+        default: break;
     }
+    const idx = cc303Index(key);
+    if (idx >= 0) return String(slot.cc303[idx] | 0);
+    return "";
+}
+
+/* Keys whose value only takes effect on the NEXT generation. */
+const STALE_KEYS = new Set(["density", "accent", "slide", "octaves"]);
+
+/*
+ * WHAT A KEY WRITES.
+ *
+ * The inverse of uiGetParam and the ONLY write path the grid has. The knob
+ * engine, the throttle, the enum wire format and the option picker all sit on
+ * the far side of it, so nothing here has to know which gesture produced the
+ * value.
+ */
+function uiSetParam(key, val) {
+    const slot = cur();
+    const idx = cc303Index(key);
+    if (idx >= 0) { write303(idx, Math.round(Number(val))); return; }
+    const num = Number(val);
+    switch (key) {
+        case "density": case "accent": case "slide": case "gate":
+            if (!isFinite(num)) return;
+            slot[key] = num;
+            setDspParam(slotKey(key), num.toFixed(3));
+            break;
+        case "root": case "scale": case "direction": case "octaves":
+            if (!isFinite(num)) return;
+            slot[key] = Math.round(num);
+            setDspParam(slotKey(key), String(slot[key]));
+            break;
+        case "transpose":
+            if (!isFinite(num)) return;
+            slot.transpose = clamp(Math.round(num), -48, 48);
+            setDspParam(slotKey("transpose"), String(slot.transpose));
+            break;
+        case "length": {
+            /* The step COUNT out of "16 Steps" -- see uiGetParam and firstInt. */
+            const n = firstInt(val);
+            if (!isFinite(n) || n <= 0) return;
+            slot.length = n;
+            setDspParam(slotKey("length"), String(slot.length));
+            clampStepView();
+            break;
+        }
+        case "channel": {
+            /* The channel NUMBER out of "Ch 10". */
+            const n = firstInt(val);
+            if (!isFinite(n)) return;
+            slot.channel = clamp(n, 1, 16);
+            setDspParam(slotKey("channel"), String(slot.channel));
+            break;
+        }
+        /* current_bank is `access: "read"`; isTurnable refuses it and the
+         * picker refuses it, so nothing can reach here with it. */
+        default: return;
+    }
+    if (STALE_KEYS.has(key)) patternStale = true;
+}
+
+/*
+ * A VALUE THE GRID DID NOT WRITE MUST BE TOLD TO THE GRID.
+ *
+ * TB-3PO edits several params from places that are not a knob: the Ch-/Ch+ and
+ * DIR action pads, the hardware +/- buttons, and a bank recall that brings a
+ * whole pattern (and its LENGTH) back from the DSP. The controller holds two
+ * things per key and the read cursor only refreshes one of them:
+ *
+ *   `values`      the cached reading -- refreshed by the cursor within ~9
+ *                 ticks, so a stale cell repairs itself
+ *   `knobStates`  the knob engine's running value -- seeded ONCE, on the first
+ *                 turn of that key, and never re-synced afterwards
+ *
+ * So leaving it alone is not "a cell that lags"; it is a knob that SNAPS THE
+ * VALUE BACK on the first detent after the pad. Dropping the engine state
+ * re-seeds it from the fresh reading.
+ */
+function noteExternalChange(key) {
+    const st = ctl.state;
+    st.values[key] = uiGetParam(key);
+    delete st.knobStates[key];
+}
+
+/*
+ * EVERY value at once, for the changes that are not about one key.
+ *
+ * Switching slot A/B replaces the whole parameter set -- two independent
+ * sequencers on two channels -- and pulling the 303's live values in does the
+ * same for that page. `dspValues` was recomputed on every draw, so this was
+ * free before; the controller CACHES, so it has to be told. Cheap because
+ * every read is a local field: ~20 of them, once, on a gesture.
+ */
+function syncAllValues() {
+    for (const p of ctl.pages) {
+        for (const k of (p.keys || [])) if (k) noteExternalChange(k);
+    }
+}
+
+/* One press, one channel. The knob engine is the controller's now, and an
+ * action pad is not a knob -- it has no accumulation to carry. */
+function nudgeChannel(d) {
+    const slot = cur();
+    const v = clamp((slot.channel | 0) + d, 1, 16);
+    if (v === slot.channel) return;
+    slot.channel = v;
+    setDspParam(slotKey("channel"), String(v));
+    noteExternalChange("channel");
 }
 
 let patternStale = false;  // true when prob-knobs have changed since last generate
@@ -434,104 +636,50 @@ function handleJogTurn(delta) {
     const step = delta > 0 ? 1 : -1;
     const next = clampPageIndex(ui.activeSlot) + step;
     pageIndex[ui.activeSlot] = next < 0 ? 0 : (next > n - 1 ? n - 1 : next);
+    /*
+     * THE JOG IS NOT ROUTED THROUGH `applyInput`, deliberately.
+     *
+     * Its `page` intent calls `controller.onJog`, which WRAPS within the
+     * controller's three pages -- so it would both move the wrong index and
+     * disagree with the cap above at the ends. TB-3PO owns the outer index;
+     * the controller is told where to be.
+     */
+    syncController();
 }
 
 /*
- * Which key each physical knob edits on the page currently shown.
+ * WHICH KEY A PHYSICAL KNOB EDITS is the CONTROLLER'S answer now.
  *
- * PERFORM inherits Pattern's ROW 0 -- the same four in the same positions, or
- * knob 4 would mean Octaves on one page and Gate on another. Knobs 5-8 are
- * inert there, and only one row is drawn, so the page shows what its knobs do.
+ * This was a hand-rolled table plus a page-kind switch plus a readout guard
+ * plus a per-type adjust helper -- four things `page_controller` already does,
+ * kept in step by hand. `ctl.keyAt(slot)` is the whole of it, and it cannot
+ * disagree with the cell that was drawn because the cell was drawn from the
+ * same array.
+ *
+ * PERFORM still inherits Pattern's ROW 0 -- the same four in the same
+ * positions, or knob 4 would mean Octaves on one page and Gate on another --
+ * and it does so by the controller being PARKED on the Pattern page while
+ * PERFORM is shown (see syncController and controllerPageFor). Knobs 5-8 are
+ * inert there, which is knobLive's job.
+ *
+ * Exported for the same reason it always was: the smoke test asserts which
+ * knob drives which key, and that is the redesign's load-bearing claim.
  */
 export function keyForKnob(idx) {
     if (!(idx >= 0 && idx < 8)) return null;
-    const page = curPage();
-    if (page.kind === "perform") return idx < 4 ? PAGE_PATTERN.keys[idx] : null;
-    if (page.kind === "knobs") return page.keys[idx] || null;
-    return null;
-}
-
-/*
- * The declared key -> the slot field that holds it.
- *
- * The 303 page's keys are absent on purpose: their write path is send303Cc,
- * keyed by KNOB INDEX and sending a CC to another chain slot, so they never
- * reach editKey. The declaration exists for the GRID -- widget, label, value.
- */
-const KEY_FIELD = {
-    density: "density", accent: "accent", slide: "slide", gate: "gate",
-    root: "root", scale: "scale", length: "length", octaves: "octaves",
-    channel: "channel", direction: "direction", transpose: "transpose",
-};
-
-/* Keys whose value only takes effect on the NEXT generation. */
-const STALE_KEYS = new Set(["density", "accent", "slide", "octaves"]);
-
-/*
- * Route a declared key onto the existing adjust* helpers using its own
- * metadata, so the grid's description of a param and the edit that param
- * receives come from ONE declaration.
- */
-function editKey(key, delta) {
-    /* `length` is an enum of INDICES to the grid and a step COUNT to the DSP;
-     * adjustLength is the only place that projection lives. */
-    if (key === "length") { adjustLength(delta); return; }
-    /* ...and so is `channel`, since it became an enum to earn the picker. */
-    if (key === "channel") { adjustChannel(delta); return; }
-    const field = KEY_FIELD[key];
-    if (!field) return;
-    const meta = META.getOrGuess(key);
-    if (meta.type === "enum") {
-        const n = Array.isArray(meta.options) ? meta.options.length : 0;
-        if (n > 0) adjustEnum(key, field, delta, n);
-        return;
-    }
-    if (meta.type === "int") {
-        const step = meta.step > 0 ? meta.step : 1;
-        const span = (meta.max - meta.min) / step;
-        /* Tiny ranges (octaves 1..3) feel like enums. */
-        if (step === 1 && span <= 8) { adjustIntAsEnum(key, field, delta, meta.min, meta.max); return; }
-        adjustInt(key, field, delta, meta.min, meta.max, step);
-        return;
-    }
-    adjustFloat(key, field, delta, meta.step > 0 ? meta.step : 0.01, meta.min, meta.max);
-}
-
-
-function handleKnob(knobIdx, delta) {
-    if (delta === 0) return;
-    const key = keyForKnob(knobIdx);
-    if (!key) return;
-    /*
-     * A READOUT shows its reading and writes nothing.
-     *
-     * The shadow UI does this for chain components in isReadoutParam, but
-     * TB-3PO is a TOOL with its OWN knob dispatch, so it gets none of that for
-     * free and has to honour `access: "read"` itself -- otherwise turning the
-     * Bank cell would write current_bank, which the DSP does not accept.
-     */
-    if (isReadOnly(META.getOrGuess(key))) return;
-    /*
-     * The 303 page writes by CC to ANOTHER chain slot, keyed by knob index --
-     * the "303." prefix is stripped by never being used as a write target.
-     */
-    if (curPage().name === "303") {
-        send303Cc(knobIdx, delta);
-    } else {
-        editKey(key, delta);
-        if (STALE_KEYS.has(key)) patternStale = true;
-    }
+    if (!knobLive(idx)) return null;
+    return ctl.keyAt(idx) || null;
 }
 
 /* ===================== THE ENUM OPTION PICKER =====================
  *
- * Touch a knob, click the jog: the cell under your hand opens as a list. That
- * is the shared UI's gesture for a divable cell, and a CHAIN COMPONENT gets it
- * for free from the grid controller. TB-3PO is a TOOL -- it owns its own MIDI
- * dispatch and its own draw -- so it gets none of it, and the list it opens has
- * to be the SAME list, not a second one. Hence drawEnumList rather than a local
- * drawMenuList call: "a second list widget is how Master FX and the chain
- * editor drifted apart".
+ * Touch a knob, click the jog: the cell under your hand opens as a list. The
+ * GESTURE and the DECISION are the controller's -- `applyInput` routes the
+ * click, `onClick` decides the cell is a door and `takePending` hands over the
+ * options -- but the LIST ITSELF is drawn here, because the controller does
+ * not draw one: it hands the host an intent and expects the host to own the
+ * screen. Hence drawEnumList rather than a local drawMenuList call: "a second
+ * list widget is how Master FX and the chain editor drifted apart".
  *
  * WHAT IS DIFFERENT HERE, and it is not a design choice: THERE IS NO CANCEL.
  *
@@ -544,7 +692,7 @@ function handleKnob(knobIdx, delta) {
  * gain. A second jog click commits; nothing cancels. The footer says exactly
  * that (JOG SEL / CLK SET) and never advertises a BACK EXIT it cannot honour.
  *
- * Nothing is written while you scroll -- the commit is one setKeyIndex at
+ * Nothing is written while you scroll -- the commit is one commitEnum at
  * close -- so the `*` mark still means "the value that is live", and moving off
  * it still reads as having moved off it.
  */
@@ -553,57 +701,29 @@ let picker = null;
 function pickerIsOpen() { return picker !== null; }
 
 /*
- * Write an option INDEX to a key.
+ * OPEN THE PICKER FROM THE CONTROLLER'S OWN INTENT.
  *
- * The inverse of dspValues for exactly the keys the grid indexes, which is why
- * `length` and `channel` are named here as well: the picker commits an index
- * and the DSP wants a step count and a channel number.
- */
-function setKeyIndex(key, idx) {
-    const slot = cur();
-    if (key === "length") {
-        const v = LENGTHS[idx];
-        if (v === undefined || v === slot.length) return;
-        slot.length = v;
-        setDspParam(slotKey("length"), String(v));
-        clampStepView();
-        return;
-    }
-    if (key === "channel") {
-        const v = clamp((idx | 0) + 1, 1, 16);
-        if (v === slot.channel) return;
-        slot.channel = v;
-        setDspParam(slotKey("channel"), String(v));
-        return;
-    }
-    const field = KEY_FIELD[key];
-    if (!field) return;
-    if (slot[field] === idx) return;
-    slot[field] = idx;
-    setDspParam(slotKey(key), String(idx));
-    if (STALE_KEYS.has(key)) patternStale = true;
-}
-
-/*
- * Open the picker on a key, or refuse.
+ * `applyInput` routes a click on a held cell to `controller.onClick`, which
+ * decides whether that cell is a door -- the SAME `divable` predicate the
+ * footer hint and the corner brackets use -- and, for an enum, hands back the
+ * option list and the live index in `takePending()`. There is no second
+ * "is it an enum, does it have options, where is it now" test here any more;
+ * re-deriving that is exactly how a footer promising CLK OPEN and a click that
+ * opens nothing come apart.
  *
- * `isDivable` is the SAME predicate the shared grid uses, rather than a local
- * "is it an enum" test: a readout (current_bank) and a trigger are excluded
- * from `divable` by construction, and re-deriving that here is how the two
- * would come apart. An empty option list is refused for the reason
- * openEnumPicker refuses one -- a screen with nothing on it and, here, no way
- * back off it.
+ * A non-enum door (a filepath, a canvas) would arrive with no `options`. TB-3PO
+ * declares none and has no editor to open one in, so it is refused rather than
+ * showing an empty list you cannot back out of.
  */
-function openPickerFor(key) {
-    if (!key) return false;
-    const meta = META.getOrGuess(key);
-    if (!isDivable(meta)) return false;
-    const options = Array.isArray(meta.options) ? meta.options.map(String) : [];
+function openPickerFrom(pending) {
+    if (!pending || pending.action !== "open") return false;
+    const options = Array.isArray(pending.options) ? pending.options.map(String) : [];
     if (options.length === 0) return false;
-    const live = clamp(dspValues(cur())[key] | 0, 0, options.length - 1);
+    const meta = pending.meta || {};
+    const live = clamp(pending.index | 0, 0, options.length - 1);
     picker = {
-        key: key,
-        title: meta.label || meta.name || key,
+        key: pending.key,
+        title: meta.label || meta.name || pending.key,
         options: options,
         index: live,
         /* The value that is LIVE, i.e. what the `*` marks. */
@@ -621,11 +741,21 @@ function pickerJog(delta) {
     picker.index = clamp(picker.index + delta, 0, picker.options.length - 1);
 }
 
+/*
+ * The commit is `ctl.commitEnum`, not a local write.
+ *
+ * It puts the value on the wire through `enumWireValue`, which respects
+ * whichever convention the param declared -- and `length` and `channel` are
+ * `options_as_string`, so an index write here would be silently wrong for
+ * thirteen of the sixteen channels. It also drops the knob state for that key,
+ * so the first detent after the picker steps from where you left it rather
+ * than snapping back.
+ */
 function closePicker(commit) {
     if (!picker) return;
     const p = picker;
     picker = null;
-    if (commit) setKeyIndex(p.key, p.index);
+    if (commit) ctl.commitEnum(p.key, p.index);
 }
 
 // Slot that currently hosts the 303 plugin. Refreshed on 303-mode entry and
@@ -666,18 +796,41 @@ function sync303FromPlugin() {
         if (!isFinite(fv)) continue;
         slot.cc303[i] = Math.round(clamp(fv * 127, 0, 127));
     }
+    /* Eight values replaced behind the grid's back -- see noteExternalChange. */
+    for (const k of CC_303_PARAM_KEYS) noteExternalChange(CC_303_PREFIX + k);
 }
 
-function send303Cc(knobIdx, delta) {
-    const cc = CC_303[knobIdx];
-    if (cc === undefined || delta === 0) return;
+/*
+ * "303.cutoff" -> 0, or -1 for a key that is not the 303 page's.
+ *
+ * The prefix is stripped by looking the suffix up in CC_303_PARAM_KEYS, which
+ * is also the array the CC numbers are indexed by -- so the declared key, the
+ * plugin's real param name and the CC it rides on cannot drift apart. The
+ * prefix exists because "accent" is already this sequencer's accent
+ * PROBABILITY; see the note in params.mjs.
+ */
+const CC_303_PREFIX = "303.";
+function cc303Index(key) {
+    if (key.slice(0, CC_303_PREFIX.length) !== CC_303_PREFIX) return -1;
+    return CC_303_PARAM_KEYS.indexOf(key.slice(CC_303_PREFIX.length));
+}
+
+/*
+ * A 303 param is written as a CC to ANOTHER chain slot, not as a set_param.
+ *
+ * This used to take a knob index and a DELTA and run its own knob_engine. It
+ * takes a VALUE now: the controller owns the engine, so the accumulation, the
+ * fine mode and the throttle all happen once, in the one place, for every
+ * param TB-3PO has -- and this is left with the part that is genuinely
+ * different, which is that the destination is a MIDI CC.
+ */
+function write303(idx, value) {
+    const cc = CC_303[idx];
+    if (cc === undefined || !isFinite(value)) return;
     const slot = cur();
-    const cur303 = slot.cc303[knobIdx] | 0;
-    const st = getKnobState("303:" + knobIdx, cur303);
-    const cfg = { type: KNOB_TYPE_INT, min: 0, max: 127, step: 1 };
-    const next = knobStep(st, cfg, delta, Date.now());
-    if (next === cur303) return;
-    slot.cc303[knobIdx] = next;
+    const next = clamp(Math.round(value), 0, 127);
+    if (next === (slot.cc303[idx] | 0)) return;
+    slot.cc303[idx] = next;
     if (typeof shadow_send_midi_to_dsp === "function") {
         const chStatus = 0xB0 | ((slot.channel - 1) & 0x0F);
         shadow_send_midi_to_dsp([chStatus, cc, next]);
@@ -700,13 +853,17 @@ function selectSlotPage(slotIdx, pageName) {
         cc303SlotIdx = find303Slot();
         has303Slot = cc303SlotIdx >= 0;
     }
+    const slotChanged = ui.activeSlot !== slotIdx;
     ui.activeSlot = slotIdx;
     setDspParam("active_slot", String(slotIdx));
+    /* A different slot is a different set of values behind the same keys. */
+    if (slotChanged) syncAllValues();
     const r = pages();
     let found = r.findIndex((pg) => pg.name === pageName);
     if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
     pageIndex[slotIdx] = found < 0 ? 0 : found;
     if (pageName === "303" && has303Slot) sync303FromPlugin();
+    syncController();
 }
 
 // -------- Pad handling ----------
@@ -737,6 +894,7 @@ function handlePadNoteOn(note, vel) {
         if (shiftHeld) {
             setDspParam(slotKey("store_bank"), String(col));
             slot.currentBank = col;
+            noteExternalChange("current_bank");
             showOverlay("Bank " + bn, "saved");
         } else {
             if (ui.running) {
@@ -749,6 +907,7 @@ function handlePadNoteOn(note, vel) {
                 setDspParam(slotKey("recall_bank_now"), String(col));
                 slot.currentBank = col;
                 slot.pendingRecall = -1;
+                noteExternalChange("current_bank");
                 showOverlay("Bank " + bn, "recalled");
             }
         }
@@ -766,14 +925,15 @@ function handlePadNoteOn(note, vel) {
             case 2:
                 slot.direction = (slot.direction + 1) & 3;
                 setDspParam(slotKey("direction"), String(slot.direction));
+                noteExternalChange("direction");
                 showOverlay("Direction", DIRECTIONS[slot.direction] || "?");
                 break;
             case 3:
-                adjustInt("channel", "channel", -1, 1, 16);
+                nudgeChannel(-1);
                 showOverlay("Channel", String(cur().channel));
                 break;
             case 4:
-                adjustInt("channel", "channel", +1, 1, 16);
+                nudgeChannel(+1);
                 showOverlay("Channel", String(cur().channel));
                 break;
             default: break;
@@ -961,11 +1121,6 @@ function draw() {
     const slot = cur();
     const r = pages();
     const idx = clampPageIndex(ui.activeSlot);
-    /* A knob with no key on this page has no cell to strip, and Setup's
-     * knobs 5-8 have no key at all -- so the touch is reported only where
-     * there is something for it to highlight. */
-    const heldKey = keyForKnob(touchedKnob);
-    const touched = heldKey ? touchedKnob : -1;
     drawPage(fb, ctx, {
         /* DIVABILITY IS A FOOTER FACT. The cell wears no mark for it -- 953 of
          * the fleet's 967 divable cells wear none -- so the only honest place
@@ -979,42 +1134,36 @@ function draw() {
         position: slot.position,
         stepView: slot.stepView,
         shiftHeld: shiftHeld,
-        touched: touched,
-        values: dspValues(slot)
+        /* A knob with no key on this page has no cell to strip, and Setup's
+         * knobs 5-8 have no key at all -- so the touch is reported only where
+         * there is something for it to highlight. See heldSlot(). */
+        touched: heldSlot(),
+        /* The controller holds the values, the metadata, the page and the
+         * widgets. Nothing about the grid is passed alongside it any more --
+         * a second copy of any of those is what this redesign removed. */
+        ctl: ctl
     });
     // Overlay last so it sits on top of whatever the page drew.
     drawOverlay();
-}
-
-/* The grid reads values by KEY, so the slot's fields are projected onto the
- * declared keys rather than the grid being taught about slots.
- *
- * `length` is an enum of INDICES to the grid and a step COUNT on the slot, so
- * it is projected back through LENGTHS here -- the inverse of adjustLength.
- * `channel` is the same shape for the same reason (it is an enum so that it is
- * DIVABLE): index here, channel number on the slot -- the inverse of
- * adjustChannel. Both projections are one line each and both are in this pair
- * of functions; a third place that guesses is how a knob writes 0.058750 into
- * an enum. */
-function dspValues(slot) {
-    return {
-        density: slot.density, accent: slot.accent, slide: slot.slide, gate: slot.gate,
-        root: slot.root, scale: slot.scale,
-        length: Math.max(0, LENGTHS.indexOf(slot.length)), octaves: slot.octaves,
-        "303.cutoff": slot.cc303[0], "303.resonance": slot.cc303[1],
-        "303.decay": slot.cc303[2], "303.env_mod": slot.cc303[3],
-        "303.accent": slot.cc303[4], "303.volume": slot.cc303[5],
-        "303.drive": slot.cc303[6], "303.drive_mix": slot.cc303[7],
-        channel: clamp((slot.channel | 0) - 1, 0, 15),
-        direction: slot.direction, transpose: slot.transpose,
-        current_bank: slot.currentBank + 1
-    };
 }
 
 // -------- Lifecycle ----------
 
 globalThis.init = function() {
     console.log("[tb3po] ui init");
+    /*
+     * Plan the pages BEFORE the first frame.
+     *
+     * `load` reads the contract, plans, builds the meta index and warms the
+     * landing page's values, all synchronously -- which it can, because every
+     * read is a local field. Skipping it would draw one frame of a component
+     * with no pages, and `load` is also where the 303 scan's answer first
+     * reaches the hierarchy.
+     */
+    cc303SlotIdx = find303Slot();
+    has303Slot = cc303SlotIdx >= 0;
+    ctl.load({ slot: 0, component: "synth" });
+    syncController();
     // Reconcile the per-slot output channel down to the DSP on load.
     // The UI owns the channel setting but, until now, only pushed it to the
     // DSP from the channel-edit handler — never on init/resume. The DSP boots
@@ -1035,6 +1184,22 @@ globalThis.init = function() {
 globalThis.tick = function() {
     tickOverlay();
     pollDsp();
+    /*
+     * One stop of the controller's read cursor per frame.
+     *
+     * It is the shared rotation and it is deliberately not unrolled here. On
+     * hardware the stagger exists because a param read is ~2.8 ms of IPC
+     * against a 1.68 ms whole-page render; here a read is a field access, so
+     * the only thing the rotation costs is up to ~9 frames of lag on a value
+     * something OTHER than the grid changed -- and every such value is either
+     * pushed in by noteExternalChange or is the Bank readout, which already
+     * has an overlay saying what it just did.
+     *
+     * `reloadIfChanged` is NOT called per tick: planPages is not free, and the
+     * only thing that changes this contract's shape is a 303 arriving or
+     * leaving, which pollDsp already notices.
+     */
+    ctl.tick();
     refreshLeds();
     draw();
 };
@@ -1046,14 +1211,21 @@ globalThis.onMidiMessageInternal = function(data) {
     const d2 = data[2] | 0;
     const type = status & 0xF0;
 
-    // Capacitive touch: notes 0-7 = knob touches, 8 = master touch, 9 = main jog.
-    // The grid puts the held knob's full name and value in the header strip,
-    // so the overlay is no longer popped here -- the strip needs only to know
-    // which knob is under a finger.
+    /*
+     * Capacitive touch: notes 0-7 = knob touches, 8 = master touch, 9 = main jog.
+     *
+     * Notes 0-7 go to the CONTROLLER, always -- even on Pads and Keys, where
+     * no knob does anything. A touch is an edge pair, and gating the release
+     * on the page you happen to be looking at is how a knob gets left stuck as
+     * "held" after a page change. What the page gates is the DRAW (heldSlot)
+     * and the TURN (knobLive), neither of which latches.
+     *
+     * 8 and 9 are the master-volume and jog pads and belong to nobody here.
+     */
     if ((type === 0x90 || type === 0x80) && d1 < 10) {
         if (d1 < 8) {
-            if (type === 0x90 && d2 > 0) touchedKnob = d1;
-            else if (touchedKnob === d1) touchedKnob = -1;
+            const t = decodeInput(data, { shift: shiftHeld });
+            if (t) applyInput(ctl, t, { nowMs: Date.now() });
         }
         return;
     }
@@ -1114,6 +1286,7 @@ globalThis.onMidiMessageInternal = function(data) {
         const slot = cur();
         slot.transpose = Math.max(-48, (slot.transpose | 0) - 12);
         setDspParam(slotKey("transpose"), String(slot.transpose));
+        noteExternalChange("transpose");
         showOverlay("Transpose", (slot.transpose / 12) + " oct");
         return;
     }
@@ -1121,6 +1294,7 @@ globalThis.onMidiMessageInternal = function(data) {
         const slot = cur();
         slot.transpose = Math.min( 48, (slot.transpose | 0) + 12);
         setDspParam(slotKey("transpose"), String(slot.transpose));
+        noteExternalChange("transpose");
         showOverlay("Transpose", (slot.transpose / 12) + " oct");
         return;
     }
@@ -1153,10 +1327,22 @@ globalThis.onMidiMessageInternal = function(data) {
         else if (d1 === CC_TRACK4) { selectSlotPage(1, "303");     return; }
     }
 
-    // Knob deltas arrive as synthetic CC messages (CC 71-78).
+    /*
+     * Knob deltas arrive as synthetic CC messages (CC 71-78).
+     *
+     * `decodeInput` turns one into a `knob` intent and `applyInput` hands it to
+     * the controller, which owns the knob engine, the readout guard, the enum
+     * wire format, the write throttle and the enum peek. The four-line
+     * dispatch that used to live here was a re-derivation of all of it.
+     *
+     * SHIFT IS NOT PASSED as `fine`. Shift on this surface already means
+     * "these pad rows are save targets" and holding it is a bank gesture, not
+     * a precision gesture -- see refreshLeds' shiftHeld branch.
+     */
     if (type === 0xB0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
-        const knobIdx = d1 - CC_KNOB_BASE;
-        handleKnob(knobIdx, decodeDelta(d2));
+        if (!knobLive(d1 - CC_KNOB_BASE)) return;
+        const intent = decodeInput(data, {});
+        if (intent) knobTurn(intent);
         return;
     }
 
@@ -1166,12 +1352,24 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    /* Jog click — dive into the cell under your hand, if it has anything to
+    /*
+     * Jog click — dive into the cell under your hand, if it has anything to
      * dive into. Nothing held, or a cell that is not divable, and the click
      * does nothing at all: it is the shared UI's gesture, so it must not
-     * acquire a second meaning here. */
+     * acquire a second meaning here.
+     *
+     * SHIFT+CLICK IS NOT ROUTED. `applyInput` sends it to `openPicker`, the
+     * controller's SECTION picker -- a list of the controller's three pages
+     * under a bank bar showing six, i.e. a second navigation surface
+     * disagreeing with the one on screen. TB-3PO already has page jumps on the
+     * track buttons and the step buttons.
+     */
     if (type === 0xB0 && d1 === CC_JOG_CLICK && d2 > 0) {
-        openPickerFor(keyForKnob(touchedKnob));
+        if (shiftHeld) return;
+        if (heldSlot() < 0) return;
+        const intent = decodeInput(data, {});
+        if (!intent) return;
+        openPickerFrom(applyInput(ctl, intent, { nowMs: Date.now() }));
         return;
     }
 
@@ -1181,6 +1379,7 @@ globalThis.onMidiMessageInternal = function(data) {
         const stepIdx = d1 - NOTE_STEP_BASE;
         if (stepIdx >= 0 && stepIdx < pages().length) {
             pageIndex[ui.activeSlot] = stepIdx;
+            syncController();
         }
         return;
     }
@@ -1211,11 +1410,21 @@ globalThis.onUnload = function() {
  * `keyForKnob` are exported at their declarations above.
  */
 export const __test = {
-    ui, pageIndex, handleKnob, dspValues, curPage, editKey,
+    ui, pageIndex, curPage, ctl,
+    /*
+     * Show an outer page. THE ONLY way a test may move the index, because
+     * moving it is two things -- the outer index and the controller's -- and
+     * `syncController` is the one function that does both. A test poking
+     * `pageIndex` directly would leave the controller on the previous page and
+     * then assert against whichever one it happened to be looking at.
+     */
+    showPage: (i) => { pageIndex[ui.activeSlot] = i; syncController(); },
+    /* The controller's parameter I/O, which is the whole of TB-3PO's side of
+     * the contract: what a key reads and what a write to it does. */
+    getParam: uiGetParam, setParam: uiSetParam, noteExternalChange,
     /* The picker is module-private state driven entirely through
      * onMidiMessageInternal; the tests drive the REAL gesture and read the
      * result here rather than being handed an opener of their own. */
     picker: () => picker,
-    metaFor: (key) => META.getOrGuess(key),
-    keyField: (key) => KEY_FIELD[key],
+    metaFor: (key) => ctl.metaIndex.getOrGuess(key),
 };
