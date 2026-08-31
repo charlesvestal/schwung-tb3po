@@ -6,11 +6,15 @@ import {
 import {
     setLED as sharedSetLED, setButtonLED as sharedSetButtonLED
 } from '/data/UserData/schwung/shared/input_filter.mjs';
-import { createValue, createEnum } from '/data/UserData/schwung/shared/menu_items.mjs';
 import {
     knobInit, knobStep,
     KNOB_TYPE_FLOAT, KNOB_TYPE_INT, KNOB_TYPE_ENUM
 } from '/data/UserData/schwung/shared/knob_engine.mjs';
+import { isReadOnly } from '/data/UserData/schwung/shared/param_pages/param_meta.mjs';
+import { drawPage, META } from './pages.mjs';
+/* ROOT_NAMES and SCALE_NAMES are no longer imported: knobOverlayInfo formats
+ * an enum from its DECLARED options, so the names live in one place. */
+import { ringFor, PAGE_PATTERN, LENGTHS, DIRECTIONS } from './params.mjs';
 
 //
 // Knobs (CC 71-78, relative encoders) edit params. Pads are arranged 4x8
@@ -19,11 +23,6 @@ import {
 //
 // Knob CCs arrive as accumulated synthetic messages from shadow_ui.js (see
 // the overtake knob accumulator — positive count = CW, 128-value = CCW).
-
-const SCALE_NAMES = ["Minor", "Phrygian", "HarmMinor", "MinPent", "Dorian", "Major"];
-const ROOT_NAMES  = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const LENGTHS     = [8, 16, 24, 32];
-const DIRECTIONS  = ["Fwd", "Rev", "Ping", "Rnd"];
 
 const STEP_REST = 0;
 const STEP_NOTE = 1;
@@ -47,27 +46,9 @@ const CC_TRACK2 = 42;
 const CC_TRACK3 = 41;
 const CC_TRACK4 = 40;
 
-// Control modes — determines what the 8 knobs do.
-const MODE_3PO = 0;             // Sequencer params (density/accent/slide/...)
-const MODE_303 = 1;             // Live CC send to the 303 synth
-const MODE_NAMES = ["3PO", "303"];
-
 // 303 CC map (matches schwung-303 plugin).
 // Indexed by knob slot 0..7 → MIDI CC number.
 const CC_303 = [74, 71, 75, 70, 16, 7, 12, 13];
-const CC_303_LABELS = ["Cut", "Res", "Dec", "Env", "Acc", "Vol", "OvL", "OvW"];
-
-const PAGE_PERFORM = 0;
-const PAGE_MUTATION = 1;
-const PAGE_SCALE = 2;
-const PAGE_CHANNEL = 3;
-const PAGE_HELP = 4;
-const NUM_PAGES = 5;
-const PAGE_NAMES_3PO = ["PERFORM", "MUTATION", "SCALE", "CHANNEL", "HELP"];
-const PAGE_NAMES_303 = ["PERFORM", "303 Control 1", "303 Control 2", "CHANNEL", "HELP"];
-function pageName(idx) {
-    return (cur().mode === MODE_303 ? PAGE_NAMES_303 : PAGE_NAMES_3PO)[idx] || "?";
-}
 
 // LED palette — values are Move's note velocities (see shared/constants.mjs).
 const LED_OFF       = 0;
@@ -105,13 +86,7 @@ function makeSlot(defaults) {
         transpose: 0,
         steps: new Array(32).fill(STEP_REST),
         cc303: new Array(8).fill(64),
-        mode: MODE_3PO,
-        stepView: 0,
-        menuState: {
-            [PAGE_MUTATION]: { selectedIndex: 0, editing: false },
-            [PAGE_SCALE]:    { selectedIndex: 0, editing: false },
-            [PAGE_CHANNEL]:  { selectedIndex: 0, editing: false }
-        }
+        stepView: 0
     }, defaults || {});
 }
 
@@ -127,7 +102,26 @@ function cur() { return ui.slots[ui.activeSlot]; }
 
 let pollTick = 0;
 let shiftHeld = false;
-let currentPage = PAGE_PERFORM;
+
+/* One ring per slot: the track buttons switch rings, and jog never crosses
+ * the A/B boundary. That is what keeps a six-segment bank bar readable as a
+ * map of this slot rather than as a scrollbar over both. */
+let pageIndex = [0, 0];
+export function ring() { return ringFor({ has303: has303Slot }); }
+function curPage() { return ring()[clampPageIndex(ui.activeSlot)]; }
+function clampPageIndex(slotIdx) {
+    const n = ring().length;
+    let i = pageIndex[slotIdx] | 0;
+    if (i < 0) i = 0;
+    if (i > n - 1) i = n - 1;
+    pageIndex[slotIdx] = i;
+    return i;
+}
+
+/* The grid puts the held knob's full name and value in the header strip, so
+ * the overlay is no longer needed for it -- but the strip needs to know which
+ * knob is under a finger. */
+let touchedKnob = -1;
 
 function stepPageCount() { return Math.max(1, Math.ceil(cur().length / 16)); }
 function clampStepView()  { const m = stepPageCount() - 1; if (cur().stepView > m) cur().stepView = m; if (cur().stepView < 0) cur().stepView = 0; }
@@ -239,12 +233,24 @@ function pollDsp() {
     // Re-scan for a 303 slot every ~1.4 sec so Track 2 / 303-mode UX reflects
     // reality: hidden when no 303 is loaded, visible when one is loaded later.
     if ((pollTick % 60) === 0) {
+        /* The 303 page is PRESENT or ABSENT, so a plugin appearing or leaving
+         * changes the ring's LENGTH -- and every index behind the 303 page
+         * then names a different page. Resolve by NAME across the change
+         * rather than clamping an index that has silently moved. */
+        const wasNames = [ring()[clampPageIndex(0)].name, ring()[clampPageIndex(1)].name];
         cc303SlotIdx = find303Slot();
         const prev = has303Slot;
         has303Slot = cc303SlotIdx >= 0;
-        if (prev && !has303Slot && cur().mode === MODE_303) {
-            cur().mode = MODE_3PO;
-            showOverlay("303 unloaded", "knob mode → 3PO");
+        if (prev !== has303Slot) {
+            const r = ring();
+            for (let sIdx = 0; sIdx < 2; sIdx++) {
+                let found = r.findIndex((pg) => pg.name === wasNames[sIdx]);
+                if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
+                pageIndex[sIdx] = found < 0 ? 0 : found;
+            }
+            if (prev && wasNames[ui.activeSlot] === "303") {
+                showOverlay("303 unloaded", "page removed");
+            }
         }
     }
     pollTick++;
@@ -291,10 +297,10 @@ function adjustFloat(key, uiKey, delta, step, lo, hi) {
     }
 }
 
-function adjustInt(key, uiKey, delta, lo, hi) {
+function adjustInt(key, uiKey, delta, lo, hi, step) {
     const slot = cur();
     const st = getKnobState(uiKey, slot[uiKey] | 0);
-    const cfg = { type: KNOB_TYPE_INT, min: lo, max: hi, step: 1 };
+    const cfg = { type: KNOB_TYPE_INT, min: lo, max: hi, step: step > 0 ? step : 1 };
     const next = knobStep(st, cfg, delta, Date.now());
     if (next !== slot[uiKey]) {
         slot[uiKey] = next;
@@ -346,182 +352,125 @@ function adjustLength(delta) {
 
 let patternStale = false;  // true when prob-knobs have changed since last generate
 
-// -------- Jog-menu items per page ----------
-// Each page that's editable declares an items() builder. The items are
-// rebuilt per access so they read the live ui state via their getters.
-
-function scalePageItems() {
-    return [
-        createEnum("K5: Root", {
-            get: () => cur().root,
-            set: (v) => { cur().root = v; setDspParam(slotKey("root"), String(v)); },
-            options: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            format: (v) => ROOT_NAMES[v] || "?"
-        }),
-        createEnum("K6: Scale", {
-            get: () => cur().scale,
-            set: (v) => { cur().scale = v; setDspParam(slotKey("scale"), String(v)); },
-            options: SCALE_NAMES.map((_, i) => i),
-            format: (v) => SCALE_NAMES[v] || "?"
-        }),
-        createEnum("K7: Length", {
-            get: () => cur().length,
-            set: (v) => { cur().length = v; setDspParam(slotKey("length"), String(v)); },
-            options: LENGTHS
-        }),
-        createValue("K8: Gate", {
-            get: () => Math.round(cur().gate * 100),
-            set: (v) => { cur().gate = v / 100; setDspParam(slotKey("gate"), (v / 100).toFixed(3)); },
-            min: 10, max: 100,
-            format: (v) => v + "%"
-        })
-    ];
-}
-
-function mutationPageItems() {
-    const setStale = () => { patternStale = true; };
-    return [
-        createValue("K1: Density", {
-            get: () => Math.round(cur().density * 100),
-            set: (v) => { cur().density = v / 100; setDspParam(slotKey("density"), (v / 100).toFixed(3)); setStale(); },
-            min: 0, max: 100, format: (v) => v + "%"
-        }),
-        createValue("K2: Accent", {
-            get: () => Math.round(cur().accent * 100),
-            set: (v) => { cur().accent = v / 100; setDspParam(slotKey("accent"), (v / 100).toFixed(3)); setStale(); },
-            min: 0, max: 100, format: (v) => v + "%"
-        }),
-        createValue("K3: Slide", {
-            get: () => Math.round(cur().slide * 100),
-            set: (v) => { cur().slide = v / 100; setDspParam(slotKey("slide"), (v / 100).toFixed(3)); setStale(); },
-            min: 0, max: 100, format: (v) => v + "%"
-        }),
-        createValue("K4: Octaves", {
-            get: () => cur().octaves,
-            set: (v) => { cur().octaves = v; setDspParam(slotKey("octaves"), String(v)); setStale(); },
-            min: 1, max: 3
-        })
-    ];
-}
-
-function channelPageItems() {
-    return [
-        createValue("MIDI Ch", {
-            get: () => cur().channel,
-            set: (v) => { cur().channel = v; setDspParam(slotKey("channel"), String(v)); },
-            min: 1, max: 16
-        })
-    ];
-}
-
-function currentPageItems() {
-    if (currentPage === PAGE_SCALE)    return scalePageItems();
-    if (currentPage === PAGE_MUTATION) return mutationPageItems();
-    if (currentPage === PAGE_CHANNEL)  return channelPageItems();
-    return null;
-}
-
-/* Jog wheel: each detent = one step. No acceleration, no enum tick budget —
- * those belong to the encoder knobs (which deliver many counts per turn);
- * the jog wheel already emits one discrete click per detent. */
-function adjustMenuItem(item, delta) {
-    if (!item || delta === 0 || !item.set || !item.get) return;
-    const step = delta > 0 ? 1 : -1;
-    const curVal = item.get();
-    if (item.type === "value") {
-        const next = clamp(curVal + step, item.min, item.max);
-        if (next !== curVal) item.set(next);
-    } else if (item.type === "enum") {
-        const opts = item.options || [];
-        if (opts.length === 0) return;
-        const idx = opts.indexOf(curVal);
-        const startIdx = idx < 0 ? 0 : idx;
-        const newIdx = clamp(startIdx + step, 0, opts.length - 1);
-        const next = opts[newIdx];
-        if (next !== curVal) item.set(next);
-    }
-}
-
+/* Jog turns PAGES. Editing a list with the jog is retired -- every value is
+ * edited by the knob above it, which is what the grid is for. */
 function handleJogTurn(delta) {
     if (delta === 0) return;
-    const state = cur().menuState[currentPage];
-    const items = currentPageItems();
-    if (!state || !items || items.length === 0) return;
-
-    if (state.editing) {
-        adjustMenuItem(items[state.selectedIndex], delta);
-        const item = items[state.selectedIndex];
-        if (item && item.get) {
-            const formatted = item.format ? item.format(item.get()) : String(item.get());
-            showOverlay(item.label, formatted);
-        }
-    } else {
-        const n = items.length;
-        // One detent per click for navigation — don't let acceleration jump
-        // multiple rows in a list this short.
-        const step = delta > 0 ? 1 : -1;
-        state.selectedIndex = (state.selectedIndex + step + n) % n;
-    }
+    const n = ring().length;
+    const step = delta > 0 ? 1 : -1;
+    pageIndex[ui.activeSlot] = (clampPageIndex(ui.activeSlot) + step + n) % n;
+    showOverlay("Page", curPage().name);
 }
 
-function handleJogClick() {
-    const state = cur().menuState[currentPage];
-    const items = currentPageItems();
-    if (!state || !items || items.length === 0) return;
-    const item = items[state.selectedIndex];
-    if (!item) return;
-    state.editing = !state.editing;
-    if (state.editing) {
-        const formatted = item.format ? item.format(item.get()) : String(item.get());
-        showOverlay("Edit " + item.label, formatted);
-    } else {
-        showOverlay(item.label, "confirmed");
-    }
-}
-
-function knobOverlayInfo(idx) {
-    const slot = cur();
-    const slotTag = ui.activeSlot === 0 ? "A" : "B";
-    if (slot.mode === MODE_303) {
-        const label = CC_303_LABELS[idx] || "?";
-        return { name: "303-" + slotTag + " " + label, value: String(slot.cc303[idx] | 0) };
-    }
-    const prefix = "TB-" + slotTag + " ";
-    switch (idx) {
-        case 0: return { name: prefix + "Density", value: Math.round(slot.density * 100) + "%" };
-        case 1: return { name: prefix + "Accent",  value: Math.round(slot.accent  * 100) + "%" };
-        case 2: return { name: prefix + "Slide",   value: Math.round(slot.slide   * 100) + "%" };
-        case 3: return { name: prefix + "Octaves", value: String(slot.octaves) };
-        case 4: return { name: prefix + "Root",    value: ROOT_NAMES[slot.root] || "?" };
-        case 5: return { name: prefix + "Scale",   value: SCALE_NAMES[slot.scale] || "?" };
-        case 6: return { name: prefix + "Length",  value: slot.length + " steps" };
-        case 7: return { name: prefix + "Gate",    value: Math.round(slot.gate * 100) + "%" };
-    }
+/*
+ * Which key each physical knob edits on the page currently shown.
+ *
+ * PERFORM inherits Pattern's ROW 0 -- the same four in the same positions, or
+ * knob 4 would mean Octaves on one page and Gate on another. Knobs 5-8 are
+ * inert there, and only one row is drawn, so the page shows what its knobs do.
+ */
+export function keyForKnob(idx) {
+    if (!(idx >= 0 && idx < 8)) return null;
+    const page = curPage();
+    if (page.kind === "perform") return idx < 4 ? PAGE_PATTERN.keys[idx] : null;
+    if (page.kind === "knobs") return page.keys[idx] || null;
     return null;
+}
+
+/*
+ * The declared key -> the slot field that holds it.
+ *
+ * The 303 page's keys are absent on purpose: their write path is send303Cc,
+ * keyed by KNOB INDEX and sending a CC to another chain slot, so they never
+ * reach editKey. The declaration exists for the GRID -- widget, label, value.
+ */
+const KEY_FIELD = {
+    density: "density", accent: "accent", slide: "slide", gate: "gate",
+    root: "root", scale: "scale", length: "length", octaves: "octaves",
+    channel: "channel", direction: "direction", transpose: "transpose",
+};
+
+/* Keys whose value only takes effect on the NEXT generation. */
+const STALE_KEYS = new Set(["density", "accent", "slide", "octaves"]);
+
+/*
+ * Route a declared key onto the existing adjust* helpers using its own
+ * metadata, so the grid's description of a param and the edit that param
+ * receives come from ONE declaration.
+ */
+function editKey(key, delta) {
+    /* `length` is an enum of INDICES to the grid and a step COUNT to the DSP;
+     * adjustLength is the only place that projection lives. */
+    if (key === "length") { adjustLength(delta); return; }
+    const field = KEY_FIELD[key];
+    if (!field) return;
+    const meta = META.getOrGuess(key);
+    if (meta.type === "enum") {
+        const n = Array.isArray(meta.options) ? meta.options.length : 0;
+        if (n > 0) adjustEnum(key, field, delta, n);
+        return;
+    }
+    if (meta.type === "int") {
+        const step = meta.step > 0 ? meta.step : 1;
+        const span = (meta.max - meta.min) / step;
+        /* Tiny ranges (octaves 1..3) feel like enums. */
+        if (step === 1 && span <= 8) { adjustIntAsEnum(key, field, delta, meta.min, meta.max); return; }
+        adjustInt(key, field, delta, meta.min, meta.max, step);
+        return;
+    }
+    adjustFloat(key, field, delta, meta.step > 0 ? meta.step : 0.01, meta.min, meta.max);
+}
+
+/* Overlay text for a KEY, formatted from its declared metadata rather than a
+ * switch over knob indices -- there is no longer one knob per key. */
+function knobOverlayInfo(key) {
+    if (!key) return null;
+    const meta = META.getOrGuess(key);
+    const raw = dspValues(cur())[key];
+    if (raw === undefined) return null;
+    const slotTag = ui.activeSlot === 0 ? "A" : "B";
+    let value;
+    if (meta.type === "enum") {
+        const opts = Array.isArray(meta.options) ? meta.options : [];
+        const o = opts[raw | 0];
+        value = o === undefined ? String(raw) : String(o);
+    } else if (meta.type === "float") {
+        value = meta.unit === "%" ? (Math.round(raw * 100) + "%") : String(raw);
+    } else {
+        value = String(raw);
+    }
+    const prefix = key.indexOf("303.") === 0 ? "303-" : "TB-";
+    return { name: prefix + slotTag + " " + meta.label, value };
 }
 
 function handleKnob(knobIdx, delta) {
     if (delta === 0) return;
-    if (cur().mode === MODE_303) {
+    const key = keyForKnob(knobIdx);
+    if (!key) return;
+    /*
+     * A READOUT shows its reading and writes nothing.
+     *
+     * The shadow UI does this for chain components in isReadoutParam, but
+     * TB-3PO is a TOOL with its OWN knob dispatch, so it gets none of that for
+     * free and has to honour `access: "read"` itself -- otherwise turning the
+     * Bank cell would write current_bank, which the DSP does not accept.
+     */
+    if (isReadOnly(META.getOrGuess(key))) {
+        const ro = knobOverlayInfo(key);
+        if (ro) showOverlay(ro.name, ro.value);
+        return;
+    }
+    /*
+     * The 303 page writes by CC to ANOTHER chain slot, keyed by knob index --
+     * the "303." prefix is stripped by never being used as a write target.
+     */
+    if (curPage().name === "303") {
         send303Cc(knobIdx, delta);
     } else {
-        switch (knobIdx) {
-            // Probability/shape knobs — affect the NEXT generation. Press the NEW
-            // action pad (or Mutate) to apply. Mark the pattern as stale so the UI
-            // can nudge the user.
-            case 0: adjustFloat("density", "density", delta, 0.01, 0, 1); patternStale = true; break;
-            case 1: adjustFloat("accent",  "accent",  delta, 0.01, 0, 1); patternStale = true; break;
-            case 2: adjustFloat("slide",   "slide",   delta, 0.01, 0, 1); patternStale = true; break;
-            case 3: adjustIntAsEnum("octaves", "octaves", delta, 1, 3);   patternStale = true; break;
-            // Playback knobs — affect emission immediately without regenerating.
-            case 4: adjustEnum("root",     "root",    delta, 12); break;
-            case 5: adjustEnum("scale",    "scale",   delta, SCALE_NAMES.length); break;
-            case 6: adjustLength(delta); break;
-            case 7: adjustFloat("gate",    "gate",    delta, 0.05, 0.1, 1.0); break;
-        }
+        editKey(key, delta);
+        if (STALE_KEYS.has(key)) patternStale = true;
     }
-    // Update overlay with fresh value.
-    const info = knobOverlayInfo(knobIdx);
+    const info = knobOverlayInfo(key);
     if (info) showOverlay(info.name, info.value);
 }
 
@@ -581,24 +530,30 @@ function send303Cc(knobIdx, delta) {
     }
 }
 
-// Track buttons T1-T4 select (slot, mode). Force a fresh 303-slot scan on
-// 303-mode entries so a just-loaded 303 is picked up without waiting for
-// the periodic poll; bail with a nudge if there's nothing to control.
-function selectSlotMode(slotIdx, mode) {
-    if (mode === MODE_303) {
+/*
+ * Slot AND page, not slot and mode.
+ *
+ * 3PO vs 303 was a KNOB mode because there was nowhere to show it; it is two
+ * pages now and the header names them. With no 303 reachable the 303 page is
+ * absent from the ring, so T2/T4 land on Pattern -- there is nothing to refuse
+ * and no overlay explaining a refusal.
+ *
+ * The 303 scan is forced here so a just-loaded 303 is picked up without
+ * waiting for the ~1.4 s poll.
+ */
+function selectSlotPage(slotIdx, pageName) {
+    if (pageName === "303") {
         cc303SlotIdx = find303Slot();
         has303Slot = cc303SlotIdx >= 0;
-        if (!has303Slot) {
-            showOverlay("No 303 loaded", "route a 303 to Ch" + ui.slots[slotIdx].channel);
-            return;
-        }
     }
     ui.activeSlot = slotIdx;
-    ui.slots[slotIdx].mode = mode;
     setDspParam("active_slot", String(slotIdx));
-    if (mode === MODE_303) sync303FromPlugin();
-    showOverlay("Slot " + (slotIdx === 0 ? "A" : "B"),
-                mode === MODE_3PO ? "3PO" : "303 CCs");
+    const r = ring();
+    let found = r.findIndex((pg) => pg.name === pageName);
+    if (found < 0) found = r.findIndex((pg) => pg.name === "Pattern");
+    pageIndex[slotIdx] = found < 0 ? 0 : found;
+    if (pageName === "303" && has303Slot) sync303FromPlugin();
+    showOverlay("Slot " + (slotIdx === 0 ? "A" : "B"), curPage().name);
 }
 
 // -------- Pad handling ----------
@@ -710,13 +665,13 @@ function setTrackLed(cc, color) {
     sharedSetButtonLED(cc, color & 0x7F, ledForceNextRefresh);
 }
 
-// Colour a track button for (slot, mode): bright when it's the active
-// slot+mode, dim when not, off for 303 buttons without a 303 loaded.
-function trackLed(slotIdx, mode) {
-    const active = (ui.activeSlot === slotIdx && ui.slots[slotIdx].mode === mode);
-    if (mode === MODE_303 && !has303Slot) return LED_OFF;
+// Colour a track button for (slot, page): bright when that slot is active AND
+// showing that page, dim when not, off for 303 buttons with no 303 loaded.
+function trackLed(slotIdx, pageName) {
+    if (pageName === "303" && !has303Slot) return LED_OFF;
+    const active = (ui.activeSlot === slotIdx && curPage().name === pageName);
     if (!active) return LED_DARK_GREY;
-    return mode === MODE_3PO ? LED_TEAL : LED_ORANGE;
+    return pageName === "Pattern" ? LED_TEAL : LED_ORANGE;
 }
 
 function refreshLeds() {
@@ -785,21 +740,25 @@ function refreshLeds() {
     setLed(0, 6, LED_OFF);
     setLed(0, 7, LED_OFF);
 
-    // Step buttons 1..NUM_PAGES — page selector. Available = white, current = green.
+    // Step buttons — page selector, one per page in the CURRENT ring (five or
+    // six, depending on whether a 303 is reachable). Available = white,
+    // current = green.
+    const pageCount = ring().length;
+    const shownPage = clampPageIndex(ui.activeSlot);
     for (let i = 0; i < NUM_STEP_BUTTONS; i++) {
-        if (i < NUM_PAGES) {
-            setStepLed(i, (i === currentPage) ? LED_GREEN : LED_WHITE);
+        if (i < pageCount) {
+            setStepLed(i, (i === shownPage) ? LED_GREEN : LED_WHITE);
         } else {
             setStepLed(i, LED_OFF);
         }
     }
 
-    // Track buttons 1..4 — slot/mode selector. One is bright (active
-    // slot+mode), the others dim. T2/T4 stay dark when no 303 is reachable.
-    setTrackLed(CC_TRACK1, trackLed(0, MODE_3PO));
-    setTrackLed(CC_TRACK2, trackLed(0, MODE_303));
-    setTrackLed(CC_TRACK3, trackLed(1, MODE_3PO));
-    setTrackLed(CC_TRACK4, trackLed(1, MODE_303));
+    // Track buttons 1..4 — slot + page. One is bright (the active slot showing
+    // that page), the others dim. T2/T4 stay dark when no 303 is reachable.
+    setTrackLed(CC_TRACK1, trackLed(0, "Pattern"));
+    setTrackLed(CC_TRACK2, trackLed(0, "303"));
+    setTrackLed(CC_TRACK3, trackLed(1, "Pattern"));
+    setTrackLed(CC_TRACK4, trackLed(1, "303"));
 
     // Hardware buttons tb3po owns. Play is intentionally NOT set here —
     // we want Move firmware to drive it (passthrough capability).
@@ -818,172 +777,52 @@ function refreshLeds() {
 
 // -------- Display ----------
 
-// Action pad labels — the 8 pads on the bottom row (row 0 of the pad grid).
-// Several actions live on hardware buttons instead of pads so the grid stays
-// clean: CLEAR on X, octave ± on the + / − buttons, transport on Play.
-const PAD_ACTION_LABELS = ["NEW", "MUT", "DIR", "Ch-", "Ch+", "", "", ""];
-
-function drawStepGrid(y) {
-    if (typeof draw_rect !== "function" || typeof fill_rect !== "function") return;
-    clampStepView();
-    const slot = cur();
-    const pageBase = slot.stepView * 16;
-    const nVisible = Math.max(0, Math.min(16, slot.length - pageBase));
-    for (let i = 0; i < nVisible; i++) {
-        const x = i * 8;
-        const step = pageBase + i;
-        const s = slot.steps[step];
-        const isNow = (step === slot.position);
-        if (s === STEP_REST) {
-            draw_rect(x + 2, y + 2, 4, 4, 1);
-        } else if (s === STEP_NOTE) {
-            fill_rect(x + 2, y + 1, 4, 6, 1);
-        } else if (s === STEP_ACCENT) {
-            fill_rect(x + 1, y, 6, 8, 1);
-        } else if (s === STEP_SLIDE) {
-            fill_rect(x + 2, y + 1, 4, 6, 1);
-            if (typeof draw_line === "function") draw_line(x, y + 8, x + 8, y + 8, 1);
-        }
-        if (isNow) draw_rect(x, y - 1, 8, 10, 1);
-    }
-}
-
-// Horizontal bar: empty frame + filled proportion. Label on left, value on right.
-function drawBar(y, label, frac, valStr) {
-    if (typeof print === "function") print(0, y, label, 1);
-    const BAR_X = 32, BAR_W = 72, BAR_H = 6;
-    if (typeof draw_rect === "function") draw_rect(BAR_X, y, BAR_W, BAR_H, 1);
-    const fw = Math.max(0, Math.min(BAR_W - 2, Math.round((BAR_W - 2) * frac)));
-    if (fw > 0 && typeof fill_rect === "function") fill_rect(BAR_X + 1, y + 1, fw, BAR_H - 2, 1);
-    if (typeof print === "function") print(BAR_X + BAR_W + 2, y, valStr, 1);
-}
-
-function drawPageFooter(y) {
-    if (typeof print !== "function") return;
-    // "Page 1 PERFORM" — just name the current page and offer step hint.
-    print(0, y, "Page " + (currentPage + 1) + " " + pageName(currentPage), 1);
-}
-
-function drawPerformPage() {
-    const slot = cur();
-    const scaleName = (SCALE_NAMES[slot.scale] || "?").substr(0, 3);
-    const rootName = ROOT_NAMES[slot.root] || "?";
-    const dirName = DIRECTIONS[slot.direction] || "?";
-    if (typeof print === "function") {
-        // 21-char max: "Amin 120 EXT Ch1 B1 F"
-        print(0, 0, rootName + scaleName + " " + (ui.bpm | 0) + " " +
-                     ui.syncSource + " Ch" + slot.channel + " B" + (slot.currentBank + 1) +
-                     " " + dirName.charAt(0), 1);
-    }
-    drawStepGrid(12);
-    if (typeof print === "function") {
-        const modeTxt = "knobs: " + MODE_NAMES[slot.mode];
-        const pageTxt = stepPageCount() > 1 ? ("  pg" + (slot.stepView + 1) + "/" + stepPageCount()) : "";
-        print(0, 26, "Pos " + (slot.position + 1) + "/" + slot.length + pageTxt + "  " + modeTxt, 1);
-        if (patternStale) {
-            print(0, 40, "* press Pad 1 for NEW", 1);
-        } else if (stepPageCount() > 1) {
-            print(0, 40, "</> pages  T1=3PO T2=303", 1);
-        } else {
-            print(0, 40, "T1=3PO  T2=303", 1);
-        }
-    }
-    drawPageFooter(56);
-}
-
-function drawMenuList(items, state, startY) {
-    // Menu row style: selected row gets inverted background (fill + black text).
-    // Editing shows [value] brackets. Same visual language as core menus.
-    if (typeof print !== "function") return;
-    for (let i = 0; i < items.length; i++) {
-        const it = items[i];
-        const y = startY + i * 10;
-        const val = it.get ? it.get() : "";
-        const formatted = it.format ? it.format(val) : String(val);
-        const line = it.label + ": " + formatted;
-        const selected = (i === state.selectedIndex);
-        const editing = selected && state.editing;
-        if (selected) {
-            if (typeof fill_rect === "function") fill_rect(0, y - 1, 128, 9, 1);
-            const prefix = editing ? "> " : "  ";
-            const shown = editing ? (it.label + ": [" + formatted + "]") : line;
-            print(2, y, prefix + shown, 0);
-        } else {
-            print(2, y, "  " + line, 1);
-        }
-    }
-}
-
-function drawMutationPage() {
-    const slot = cur();
-    if (slot.mode === MODE_303) {
-        // 303 mode — knobs 1-4 map to Cutoff/Reson/Decay/EnvMod.
-        if (typeof print !== "function") return;
-        print(0, 0, "303 Control 1 (K1-K4)", 1);
-        print(0, 14, "K1 Cutoff: " + slot.cc303[0], 1);
-        print(0, 24, "K2 Reson:  " + slot.cc303[1], 1);
-        print(0, 34, "K3 Decay:  " + slot.cc303[2], 1);
-        print(0, 44, "K4 EnvMod: " + slot.cc303[3], 1);
-        print(0, 56, "T1 to return to 3PO", 1);
-        return;
-    }
-    if (typeof print === "function") {
-        print(0, 0, "MUTATION" + (patternStale ? "  * stale" : ""), 1);
-    }
-    drawMenuList(mutationPageItems(), slot.menuState[PAGE_MUTATION], 14);
-    if (typeof print === "function") {
-        print(0, 56, "Jog nav/edit  P1 NEW", 1);
-    }
-}
-
-function drawScalePage() {
-    if (typeof print !== "function") return;
-    const slot = cur();
-    if (slot.mode === MODE_303) {
-        // 303 mode — knobs 5-8 map to Accent/Volume/Drive/Mix.
-        print(0, 0,  "303 Control 2 (K5-K8)", 1);
-        print(0, 14, "K5 Accent: " + slot.cc303[4], 1);
-        print(0, 24, "K6 Volume: " + slot.cc303[5], 1);
-        print(0, 34, "K7 Drive:  " + slot.cc303[6], 1);
-        print(0, 44, "K8 Mix:    " + slot.cc303[7], 1);
-        print(0, 56, "T1 to return to 3PO", 1);
-        return;
-    }
-    print(0, 0, "SCALE", 1);
-    drawMenuList(scalePageItems(), slot.menuState[PAGE_SCALE], 14);
-    print(0, 56, "Jog nav/edit  Knobs 5-8", 1);
-}
-
-function drawChannelPage() {
-    if (typeof print !== "function") return;
-    print(0, 0, "MIDI CHANNEL", 1);
-    drawMenuList(channelPageItems(), cur().menuState[PAGE_CHANNEL], 20);
-    print(0, 56, "Jog nav/edit", 1);
-}
-
-function drawHelpPage() {
-    if (typeof print !== "function") return;
-    print(0, 0,  "HELP / PAD MAP", 1);
-    print(0, 10, "Top:   steps 1-16", 1);
-    print(0, 20, "Mid:   banks (Shift save)", 1);
-    print(0, 30, "Bot:  1NEW 2MUT 3DIR", 1);
-    print(0, 38, "      4Ch- 5Ch+", 1);
-    print(0, 46, "HW: +/- oct  X=CLR", 1);
-    print(0, 54, "    Play=transport", 1);
-}
-
 function draw() {
     if (typeof clear_screen !== "function") return;
     clear_screen();
-    switch (currentPage) {
-        case PAGE_MUTATION: drawMutationPage(); break;
-        case PAGE_SCALE:    drawScalePage();    break;
-        case PAGE_CHANNEL:  drawChannelPage();  break;
-        case PAGE_HELP:     drawHelpPage();     break;
-        default:            drawPerformPage();
-    }
+    clampStepView();
+    const fb = { fillRect: fill_rect };
+    const ctx = { fillRect: fill_rect, print: print, textWidth: text_width, line: draw_line };
+    const slot = cur();
+    const r = ring();
+    const idx = clampPageIndex(ui.activeSlot);
+    /* A knob with no key on this page has no cell to strip, and Setup's
+     * knobs 5-8 have no key at all -- so the touch is reported only where
+     * there is something for it to highlight. */
+    const touched = keyForKnob(touchedKnob) ? touchedKnob : -1;
+    drawPage(fb, ctx, {
+        slotLabel: "Slot " + (ui.activeSlot === 0 ? "A" : "B"),
+        bpm: ui.bpm,
+        ring: r,
+        pageIndex: idx,
+        steps: slot.steps,
+        position: slot.position,
+        stepView: slot.stepView,
+        shiftHeld: shiftHeld,
+        touched: touched,
+        values: dspValues(slot)
+    });
     // Overlay last so it sits on top of whatever the page drew.
     drawOverlay();
+}
+
+/* The grid reads values by KEY, so the slot's fields are projected onto the
+ * declared keys rather than the grid being taught about slots.
+ *
+ * `length` is an enum of INDICES to the grid and a step COUNT on the slot, so
+ * it is projected back through LENGTHS here -- the inverse of adjustLength. */
+function dspValues(slot) {
+    return {
+        density: slot.density, accent: slot.accent, slide: slot.slide, gate: slot.gate,
+        root: slot.root, scale: slot.scale,
+        length: Math.max(0, LENGTHS.indexOf(slot.length)), octaves: slot.octaves,
+        "303.cutoff": slot.cc303[0], "303.resonance": slot.cc303[1],
+        "303.decay": slot.cc303[2], "303.env_mod": slot.cc303[3],
+        "303.accent": slot.cc303[4], "303.volume": slot.cc303[5],
+        "303.drive": slot.cc303[6], "303.drive_mix": slot.cc303[7],
+        channel: slot.channel, direction: slot.direction, transpose: slot.transpose,
+        current_bank: slot.currentBank + 1
+    };
 }
 
 // -------- Lifecycle ----------
@@ -1004,6 +843,7 @@ globalThis.init = function() {
     // First-load nudge — call out the four-button slot/mode scheme so the
     // user understands two slots (A/B) run in parallel on separate channels.
     showOverlay("Slots A+B", "T1/T2 A, T3/T4 B", 360);
+
 };
 
 globalThis.tick = function() {
@@ -1021,12 +861,13 @@ globalThis.onMidiMessageInternal = function(data) {
     const type = status & 0xF0;
 
     // Capacitive touch: notes 0-7 = knob touches, 8 = master touch, 9 = main jog.
-    // Pop the param overlay on knob touch so the user sees the current value
-    // BEFORE they turn and change it (this is what the core modules do).
+    // The grid puts the held knob's full name and value in the header strip,
+    // so the overlay is no longer popped here -- the strip needs only to know
+    // which knob is under a finger.
     if ((type === 0x90 || type === 0x80) && d1 < 10) {
-        if (type === 0x90 && d2 > 0 && d1 < 8) {
-            const info = knobOverlayInfo(d1);
-            if (info) showOverlay(info.name, info.value);
+        if (d1 < 8) {
+            if (type === 0x90 && d2 > 0) touchedKnob = d1;
+            else if (touchedKnob === d1) touchedKnob = -1;
         }
         return;
     }
@@ -1096,14 +937,14 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    // Track 1-4 buttons select (slot, mode). T1/T2 = slot A 3PO/303,
-    // T3/T4 = slot B 3PO/303. active_slot is a global DSP param (no a./b.
+    // Track 1-4 buttons select (slot, page). T1/T2 = slot A Pattern/303,
+    // T3/T4 = slot B Pattern/303. active_slot is a global DSP param (no a./b.
     // prefix) so the DSP knows which channel the 303-Control CC path rides.
     if (type === 0xB0 && d2 > 0) {
-        if      (d1 === CC_TRACK1) { selectSlotMode(0, MODE_3PO); return; }
-        else if (d1 === CC_TRACK2) { selectSlotMode(0, MODE_303); return; }
-        else if (d1 === CC_TRACK3) { selectSlotMode(1, MODE_3PO); return; }
-        else if (d1 === CC_TRACK4) { selectSlotMode(1, MODE_303); return; }
+        if      (d1 === CC_TRACK1) { selectSlotPage(0, "Pattern"); return; }
+        else if (d1 === CC_TRACK2) { selectSlotPage(0, "303");     return; }
+        else if (d1 === CC_TRACK3) { selectSlotPage(1, "Pattern"); return; }
+        else if (d1 === CC_TRACK4) { selectSlotPage(1, "303");     return; }
     }
 
     // Knob deltas arrive as synthetic CC messages (CC 71-78).
@@ -1113,38 +954,20 @@ globalThis.onMidiMessageInternal = function(data) {
         return;
     }
 
-    // Jog wheel (CC 14) — menu navigation / value editing.
-    // CHANNEL works in both knob modes (MIDI channel affects output either way);
-    // MUTATION and SCALE only in 3PO mode since 303 mode reuses those pages
-    // to show the live CC readouts.
+    // Jog wheel (CC 14) — turns PAGES, on every page. Jog click (CC 3) is
+    // left entirely to the host's exit combo.
     if (type === 0xB0 && d1 === 14) {
-        const on3poMenu = cur().mode === MODE_3PO &&
-            (currentPage === PAGE_MUTATION || currentPage === PAGE_SCALE);
-        const onChannel = currentPage === PAGE_CHANNEL;
-        if (!on3poMenu && !onChannel) return;
-        const state = cur().menuState[currentPage];
-        if (!state) return;
-        // Nav mode: 1 detent = 1 row (no acceleration, prevents overshoot on
-        // short lists). Edit mode: passes raw count to knob_engine.
         handleJogTurn(decodeDelta(d2));
         return;
     }
 
-    // Jog click (CC 3, main button) — enter/confirm edit.
-    if (type === 0xB0 && d1 === 3 && d2 > 0) {
-        const on3poMenu = cur().mode === MODE_3PO &&
-            (currentPage === PAGE_MUTATION || currentPage === PAGE_SCALE);
-        const onChannel = currentPage === PAGE_CHANNEL;
-        if (!on3poMenu && !onChannel) return;
-        handleJogClick();
-        return;
-    }
-
-    // Step buttons (notes 16-31) — page selector.
+    // Step buttons (notes 16-31) — page selector, clamped to the ring, which
+    // is five or six long depending on whether a 303 is reachable.
     if (type === 0x90 && d1 >= NOTE_STEP_BASE && d1 < NOTE_STEP_BASE + NUM_STEP_BUTTONS && d2 > 0) {
         const stepIdx = d1 - NOTE_STEP_BASE;
-        if (stepIdx >= 0 && stepIdx < NUM_PAGES) {
-            currentPage = stepIdx;
+        if (stepIdx >= 0 && stepIdx < ring().length) {
+            pageIndex[ui.activeSlot] = stepIdx;
+            showOverlay("Page", curPage().name);
         }
         return;
     }
@@ -1163,4 +986,19 @@ globalThis.onMidiMessageExternal = function(data) {
 globalThis.onUnload = function() {
     // DSP destroy_instance handles note-offs.
     console.log("[tb3po] ui onUnload");
+};
+
+/*
+ * Exported for tests/ui_smoke.mjs ONLY.
+ *
+ * Nothing on the device imports this module -- the host loads it with
+ * shadow_load_ui_module and reads globalThis -- so a named export costs
+ * nothing at runtime and is the smallest way to make the module-level wiring
+ * (which knob edits which key, and what a turn writes) assertable. `ring` and
+ * `keyForKnob` are exported at their declarations above.
+ */
+export const __test = {
+    ui, pageIndex, handleKnob, dspValues, curPage, editKey,
+    metaFor: (key) => META.getOrGuess(key),
+    keyField: (key) => KEY_FIELD[key],
 };
