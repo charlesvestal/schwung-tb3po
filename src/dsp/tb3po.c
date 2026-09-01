@@ -22,10 +22,18 @@
 #define NUM_SLOTS   2
 
 /* Binary state file. Path is fixed — tb3po is a single-instance tool. */
+/* Overridable so the host-side unit tests (tests/c/) can point the state file
+ * at a build directory instead of the device path. The shipped build never
+ * defines these, so it always gets the device path below. */
+#ifndef TB3PO_STATE_DIR
 #define TB3PO_STATE_DIR  "/data/UserData/schwung/tool_state"
+#endif
+#ifndef TB3PO_STATE_PATH
 #define TB3PO_STATE_PATH TB3PO_STATE_DIR "/tb3po.bin"
+#endif
 #define TB3PO_STATE_MAGIC 0x50334254u   /* "TB3P" little-endian */
-#define TB3PO_STATE_VERSION 2u
+#define TB3PO_STATE_VERSION 3u
+#define TB3PO_STATE_VERSION_MIN 2u   /* v2 files still load — see read_slot_blob */
 
 typedef enum { STEP_REST = 0, STEP_NOTE = 1, STEP_ACCENT = 2, STEP_SLIDE = 3 } step_kind_t;
 
@@ -86,6 +94,10 @@ typedef struct tb3po_slot {
     uint8_t bank_degrees[NUM_BANKS][MAX_STEPS];
     uint8_t bank_octaves[NUM_BANKS][MAX_STEPS];
     uint8_t bank_filled[NUM_BANKS];
+    /* A bank is a whole PATTERN, and length is part of a pattern: a 32-step
+     * bank recalled while `length` says 16 gives back half of what was
+     * stored. Kept per-bank rather than per-slot for exactly that reason. */
+    int bank_lengths[NUM_BANKS];
 
     /* One-deep undo buffer — snapshot before any destructive action (generate,
      * mutate, clear). UI can call "undo" to restore. */
@@ -187,6 +199,7 @@ static void slot_init_defaults(tb3po_slot_t *s) {
     s->position = s->length - 1;  /* first advance lands on 0 */
     s->pingpong_dir = 1;
     s->pending_recall = -1;
+    for (int b = 0; b < NUM_BANKS; b++) s->bank_lengths[b] = s->length;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -369,6 +382,30 @@ static int next_position(tb3po_slot_t *s) {
     }
 }
 
+/*
+ * THE ONE PLACE A BANK BECOMES THE LIVE PATTERN.
+ *
+ * Both recall paths (the queued one in advance_step, the immediate one in
+ * set_param) go through here, so a field added to a bank cannot be restored
+ * by one of them and forgotten by the other — which is exactly how `length`
+ * came to be left behind. Length is restored with the notes because it is
+ * part of the pattern: recalling a 32-step bank at length 16 plays half of
+ * what was stored.
+ */
+static void apply_bank(tb3po_slot_t *s, int b) {
+    if (b < 0 || b >= NUM_BANKS || !s->bank_filled[b]) return;
+    memcpy(s->steps,   s->bank_steps[b],   MAX_STEPS);
+    memcpy(s->degrees, s->bank_degrees[b], MAX_STEPS);
+    memcpy(s->octaves, s->bank_octaves[b], MAX_STEPS);
+    int len = s->bank_lengths[b];
+    if (len < 1 || len > MAX_STEPS) len = s->length;   /* never 0: %0 in next_position */
+    s->length = len;
+    /* Shrinking the pattern can strand the playhead past its end. */
+    if (s->position >= s->length) s->position = s->length - 1;
+    if (s->position < 0) s->position = 0;
+    s->current_bank = b;
+}
+
 /* Advance one slot by one step. Each slot emits note on/off on its own
  * channel; slots with the same channel will collide by design. */
 static void advance_step(tb3po_inst_t *t, tb3po_slot_t *s) {
@@ -378,13 +415,7 @@ static void advance_step(tb3po_inst_t *t, tb3po_slot_t *s) {
      * queued bank recall so pattern switches happen musically rather than
      * mid-phrase. */
     if (n == 0 && s->pending_recall >= 0 && s->pending_recall < NUM_BANKS) {
-        int b = s->pending_recall;
-        if (s->bank_filled[b]) {
-            memcpy(s->steps, s->bank_steps[b], MAX_STEPS);
-            memcpy(s->degrees, s->bank_degrees[b], MAX_STEPS);
-            memcpy(s->octaves, s->bank_octaves[b], MAX_STEPS);
-            s->current_bank = b;
-        }
+        apply_bank(s, s->pending_recall);
         s->pending_recall = -1;
     }
     s->position = n;
@@ -412,7 +443,11 @@ static void advance_all_slots(tb3po_inst_t *t) {
  * transport follow state, running flag (always re-derived from the host
  * clock on load), position, pending_recall, undo buffer.
  *
- * Format (v2): magic, ver=2, active_slot:u8, <slot_blob>, <slot_blob>
+ * Format (v3): magic, ver=3, active_slot:u8, <slot_blob>, <slot_blob>
+ *
+ * v2 files still load: the v3 slot blob is the v2 slot blob plus a trailing
+ * per-bank length array, and a v2 file's banks are seeded from that slot's
+ * own length (see read_slot_blob). Nothing a user saved is discarded.
  *
  * bpm is conceptually a top-level global but sits physically inside each
  * slot blob. Both slot blobs carry the same bpm on write; on read we take
@@ -461,13 +496,21 @@ static void write_slot_blob(FILE *f, const tb3po_slot_t *s, float bpm) {
         fwrite(s->bank_octaves[b], 1, MAX_STEPS, f);
     }
     fwrite(s->bank_filled, 1, NUM_BANKS, f);
+
+    /* v3 tail. Appended after everything v2 wrote, so a v2 file is a v3 file
+     * with this section missing — which is what makes the migration a
+     * one-line branch in the reader rather than a second parser. */
+    for (int b = 0; b < NUM_BANKS; b++) {
+        i32 = (int32_t)s->bank_lengths[b];
+        fwrite(&i32, sizeof(i32), 1, f);
+    }
 }
 
 /* Reads one slot blob. bpm_out receives the blob's bpm field (the caller
  * decides whether to use it or ignore it). Returns 1 on success, 0 on short
  * read. On failure the slot contents are partially written and must be
  * discarded by the caller. */
-static int read_slot_blob(FILE *f, tb3po_slot_t *s, float *bpm_out) {
+static int read_slot_blob(FILE *f, tb3po_slot_t *s, float *bpm_out, uint32_t ver) {
     int32_t i32;
     float   fval;
     uint32_t u32;
@@ -500,6 +543,24 @@ static int read_slot_blob(FILE *f, tb3po_slot_t *s, float *bpm_out) {
     }
     RD(s->bank_filled, NUM_BANKS);
 
+    /*
+     * MIGRATE, DO NOT DISCARD.
+     *
+     * v2 stored no per-bank length. The best available answer for those banks
+     * is the slot's own restored length — it is what they actually played, so
+     * a v2 user's banks recall exactly as they did before the upgrade. Zeroing
+     * them instead would be a sequencer that never advances (%0 in
+     * next_position), which is why this is a seed and not a memset.
+     */
+    if (ver >= 3u) {
+        for (int b = 0; b < NUM_BANKS; b++) {
+            RD(&i32, sizeof(i32));
+            s->bank_lengths[b] = i32;
+        }
+    } else {
+        for (int b = 0; b < NUM_BANKS; b++) s->bank_lengths[b] = s->length;
+    }
+
 #undef RD
     return 1;
 }
@@ -521,6 +582,12 @@ static void clamp_slot_ranges(tb3po_slot_t *s) {
     if (s->slide   < 0.0f) s->slide   = 0.0f;
     if (s->slide   > 1.0f) s->slide   = 1.0f;
     if (s->gate < 0.1f || s->gate > 1.0f) s->gate = 0.5f;
+    /* A bank length of 0 is a modulo-by-zero the moment that bank is
+     * recalled. Fall back to the slot's own length, already clamped above. */
+    for (int b = 0; b < NUM_BANKS; b++) {
+        if (s->bank_lengths[b] < 1 || s->bank_lengths[b] > MAX_STEPS)
+            s->bank_lengths[b] = s->length;
+    }
 }
 
 static int tb3po_save_state_locked(const tb3po_inst_t *t) {
@@ -594,19 +661,21 @@ static int tb3po_load_state(tb3po_inst_t *t) {
     if (fread(&ver, sizeof(ver), 1, f) != 1) {
         fclose(f); return 0;
     }
-    if (ver != TB3PO_STATE_VERSION) {
-        /* Unknown version — fall back to cold-start. */
+    if (ver < TB3PO_STATE_VERSION_MIN || ver > TB3PO_STATE_VERSION) {
+        /* Older than we migrate, or written by a NEWER build than this one —
+         * either way we cannot read it. Fall back to cold-start. */
         fclose(f);
         return 0;
     }
 
-    /* v2: active_slot:u8, then slot[0] blob, then slot[1] blob. */
+    /* v2/v3: active_slot:u8, then slot[0] blob, then slot[1] blob. The two
+     * versions differ only in a tail inside each slot blob. */
     uint8_t active = 0;
     if (fread(&active, sizeof(active), 1, f) != 1) { fclose(f); return 0; }
 
     float bpm0 = 120.0f, bpm1 = 120.0f;
-    if (!read_slot_blob(f, &t->slots[0], &bpm0)) { fclose(f); return 0; }
-    if (!read_slot_blob(f, &t->slots[1], &bpm1)) { fclose(f); return 0; }
+    if (!read_slot_blob(f, &t->slots[0], &bpm0, ver)) { fclose(f); return 0; }
+    if (!read_slot_blob(f, &t->slots[1], &bpm1, ver)) { fclose(f); return 0; }
     clamp_slot_ranges(&t->slots[0]);
     clamp_slot_ranges(&t->slots[1]);
 
@@ -856,6 +925,7 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
             memcpy(s->bank_steps[b], s->steps, MAX_STEPS);
             memcpy(s->bank_degrees[b], s->degrees, MAX_STEPS);
             memcpy(s->bank_octaves[b], s->octaves, MAX_STEPS);
+            s->bank_lengths[b] = s->length;
             s->bank_filled[b] = 1;
             s->current_bank = b;
         }
@@ -873,10 +943,7 @@ static void tb3po_set_param(void *inst, const char *key, const char *val) {
          * there's no bar boundary coming). */
         int b = parse_int(val, 0);
         if (b >= 0 && b < NUM_BANKS && s->bank_filled[b]) {
-            memcpy(s->steps, s->bank_steps[b], MAX_STEPS);
-            memcpy(s->degrees, s->bank_degrees[b], MAX_STEPS);
-            memcpy(s->octaves, s->bank_octaves[b], MAX_STEPS);
-            s->current_bank = b;
+            apply_bank(s, b);
             s->pending_recall = -1;
         }
     }

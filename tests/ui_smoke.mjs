@@ -711,5 +711,66 @@ for (const idx of r.keys()) {
     press(1);
 }
 
+/*
+ * A BANK RECALL CHANGES `length` BEHIND THE GRID'S BACK.
+ *
+ * The DSP restores a bank's stored length when the bank is recalled -- and a
+ * plain recall is QUEUED to the next bar while the transport runs, so the pad
+ * press is NOT the moment the value changes. The UI therefore learns about it
+ * the only way it can: by polling the DSP's `pattern` row, whose leading field
+ * is the LIVE length. That read reflects the state the DSP has actually
+ * applied, which is true for the immediate recall and the queued one alike --
+ * whereas syncing on the pad press would publish a length the sequencer is
+ * still a bar away from using.
+ *
+ * The controller CACHES, so noticing is not enough: the cached value has to be
+ * replaced and the knob engine's running state for that key dropped, or the
+ * next detent snaps the length back to what the grid still believed.
+ */
+{
+    const realGet = globalThis.host_module_get_param;
+    /* A 32-step pattern, as `pattern` puts it on the wire: "len|steps|degs|octs". */
+    const csv = (v) => Array.from({ length: 32 }, () => v).join(",");
+    const pattern32 = "32|" + csv(1) + "|" + csv(0) + "|" + csv(0);
+    let serving = false;
+    globalThis.host_module_get_param = (k) => {
+        if (!serving) return "";
+        if (k === "a.pattern") return pattern32;
+        if (k === "a.current_bank") return "3";
+        if (k === "a.pending_recall") return "-1";
+        return "";
+    };
+
+    /* Land on a page that carries `length` so the value is one the grid holds,
+     * then put the engine into the state a previous turn would have left. */
+    ui.__test.showPage(ui.pages().findIndex((p) => (p.keys || []).includes("length")));
+    /* An earlier case in this file may have left the length anywhere, and this
+     * one is about a CHANGE -- so put it somewhere the recall must move it
+     * from, and let the cache agree before the poll disagrees. */
+    ui.__test.ui.slots[0].length = 16;
+    ui.__test.noteExternalChange("length");
+    ui.__test.ctl.state.knobStates["length"] = { value: 16 };
+    const before = ui.__test.ctl.state.values["length"];
+
+    serving = true;
+    for (let i = 0; i < 12; i++) globalThis.tick();
+    serving = false;
+    globalThis.host_module_get_param = realGet;
+
+    eq("a recalled bank's length reaches the UI", ui.__test.ui.slots[0].length, 32);
+    check("...and replaces the controller's CACHED value",
+          ui.__test.ctl.state.values["length"] === "32",
+          "cache was " + JSON.stringify(ui.__test.ctl.state.values["length"]) +
+          " (before: " + JSON.stringify(before) + ")");
+    check("...and drops the knob engine's running value, so the next detent cannot snap it back",
+          ui.__test.ctl.state.knobStates["length"] === undefined,
+          "knobState survived: " + JSON.stringify(ui.__test.ctl.state.knobStates["length"]));
+
+    /* The bank readout follows the same poll, which is what makes the pad's
+     * highlight land when the DSP applies the recall rather than when it is
+     * queued. */
+    eq("...and the current bank follows the same read", ui.__test.ui.slots[0].currentBank, 3);
+}
+
 console.log(failures === 0 ? "ui_smoke: all passed" : "ui_smoke: " + failures + " FAILED");
 process.exit(failures === 0 ? 0 : 1);
