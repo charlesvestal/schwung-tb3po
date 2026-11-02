@@ -47,6 +47,9 @@ echo "Compiling DSP..."
 cat build/dsp.so > "$DIST_DIR/dsp.so"
 chmod 0755 "$DIST_DIR/dsp.so"
 cat src/module.json > "$DIST_DIR/module.json"
+# GPL-3.0 requires the licence text to travel with the binary. Unconditional:
+# a missing LICENSE must fail the build, not ship a tarball without it.
+cat LICENSE > "$DIST_DIR/LICENSE"
 
 # ui.js plus its sibling ES modules. A missed file here fails at IMPORT time
 # on the device, i.e. a module that installs cleanly and then does not load —

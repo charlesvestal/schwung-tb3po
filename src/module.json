@@ -4,6 +4,7 @@
     "version": "0.3.1",
     "min_host_version": "1.1.0",
     "author": "Charles Vestal",
+    "license": "GPL-3.0",
     "description": "Generative 303-style acid-bassline sequencer (after Phazerville Hemisphere Suite)",
     "component_type": "tool",
     "dsp": "dsp.so",
